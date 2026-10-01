@@ -72,6 +72,36 @@ poll + `try { raw = poll(h) } catch (String e)`, with the real cause surfaced
 (`secrets.redact`ed for tokens). `tests/Cli.kf` asserts the outage path
 reports DATA and never prints a stacktrace.
 
+## BUG-8 — ORM read lowercases column labels; camelCase entity fields bind NULL (OPEN, both binaries)
+
+`kof_db_query_n` builds the row map with `md.getColumnLabel(i).toLowerCase()`
+(`JvmConfigRuntime`), while `orm.create`/`orm.save` write the entity's
+camelCase column names verbatim. Result: on READ, `recurrenceId`/`scheduledAt`
+/… silently bind **null** (String fields) or crash with the BUG-7
+`ValueConversions` NPE (primitive fields). This was the real root cause of
+the `schedules` NPE and of `history` printing `recurrence : null`.
+
+Measured 01/10 — repro: `docs/repros/orm-camelcase/` (`myLabel` reads null,
+`myCount` throws; the raw `db.query` proves the value is stored).
+
+**Workaround (applied):** every persisted field is lower_snake_case
+(`src/Store.kf`: `created_at`, `occurrence_key`, `interval_days`,
+`recurrence_id`, `scheduled_at`, …). `tests/FakeLm.kf` pins the read path
+(`history` must NOT print `recurrence : null`).
+
+## BUG-7 — `json.decode` of missing/null PRIMITIVE record field throws the JDK binder NPE (OPEN)
+
+`json.decode<T>` where T has a `Bool`/`Int`/… component and the JSON omits
+the key (or sends `null`): `catch (String e)` receives the JDK-internal
+message (`Cannot invoke "java.lang.Number.intValue()" because the return
+value of "sun.invoke.util.ValueConversions.primitiveConversion(...)" is
+null`) instead of an honest `missing field 'done' for Envelope`. Same
+signature BUG-8 produces through the ORM. Repro:
+`docs/repros/json-missing-primitive.kf` (build + run on
+`kof-cli-0.5.0-beta.jar`). `KofLm.lmComplete` additionally pre-detects
+`{"error":...}` envelopes (retired Ollama cloud models measured) so a
+server error never reaches the binder.
+
 ## GAP-3 — no `kof.lm` in the stdlib (OPEN by design)
 
 There is no language-model namespace; `KofLm.kf` is the minimal KofLM face
@@ -90,11 +120,14 @@ zones. `tests/Cli.kf` pins this against `Terra/Marte`.
 
 - `config` precedence env `KOF_<KEY>` > `kof.config` — used by tests
   (`KOF_LM_URL=http://127.0.0.1:1` for the offline generate test).
-- Thinking models (qwen3.5:0.8b measured) return EMPTY
-  `message.content` when the token budget is consumed by `thinking` —
-  `lm.tokens` must be large (>= 2000) or the response is empty-but-valid;
-  `KofLm.lmComplete` surfaces empty content as `ok=false` with the real
-  error text, never a crash.
+- Thinking models: `qwen3.5:0.8b` on this box burns the WHOLE budget on
+  `thinking` (empty `message.content`, or ~1.5 s/token CPU time) unless the
+  request carries Ollama's `"think":false`. `KofLm` sends `think:false` by
+  default (config `lm.think=true` to opt back in) — measured: small prompt
+  without the flag did not answer in 120 s; with it, same model replied in
+  44 s. HTTP timeout is SECONDS on `http.timeout` and it behaves as
+  documented (KofLm's poll limit now uses the wall clock, not an
+  accumulated 50 ms count).
 - SQLite driver: `db.connect("jdbc:sqlite:...")` needs the sqlite-jdbc jar on
   the runtime classpath (`kof build` records the dep; standalone `java -cp`
   runs list it explicitly in README/tests).

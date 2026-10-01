@@ -52,7 +52,8 @@ Global flags: `--company <file>` (default `company.kofmd`), `--store <db>`.
 
 Config (env `KOF_<KEY>` beats `kof.config`): `lm.url` (default
 `http://localhost:11434`), `lm.model` (default `qwen3.5:0.8b` — models with a
-thinking budget need `lm.tokens` >= 2000 or they return empty), `lm.tokens`,
+Ollama thinking models need `"think":false` or a big
+`lm.tokens` — `lm.think=true` re-enables thinking), `lm.tokens`,
 `lm.timeout`, `publisher.home`, `publisher.store`, `publisher.dryrun.dir`,
 `linkedin.api`. LinkedIn credentials come ONLY from secrets
 (`KOF_LINKEDIN_ACCESS_TOKEN`, `KOF_LINKEDIN_AUTHOR_URN`) — never from the
@@ -64,10 +65,18 @@ company file, never logged (errors pass through `secrets.redact`).
 java -jar kof-cli-0.5.0-beta.jar build src --target jvm
 java -jar kof-cli-0.5.0-beta.jar test src/Recurrence.kf --target jvm   # 6 calendar/timezone tests
 java -jar kof-cli-0.5.0-beta.jar test src/Model.kf --target jvm        # status machine + keys
-java -jar kof-cli-0.5.0-beta.jar test tests --target jvm --timeout 180 # 8 CLI end-to-end
+java -jar kof-cli-0.5.0-beta.jar test tests --target jvm --timeout 300  # 8 CLI + 2 LM e2e
 ```
 
-`tests/Cli.kf` assumes KofLM is OFFLINE for the outage test by injecting
+`tests/FakeLm.kf` runs the FULL pipeline (generate -> review -> approve ->
+publish -> history -> dry-run file) against `tests/fake_lm_server.py`, a
+fixture that serves the real Ollama chat protocol over a socket — only the
+model is deterministic; kof.http, json, ORM and the targets are all live.
+Set `KOF_LM_LIVE=<model>` to additionally drive the flow through the local
+Ollama (qwen3.5:0.8b measured ~1.5 s/token on CPU — budget `lm.timeout`
+accordingly).
+
+`tests/Cli.kf` assumes the KofLM is OFFLINE for the outage test by injecting
 `KOF_LM_URL=http://127.0.0.1:1`; it asserts the error is reported as data
 (exit code + message), with no stacktrace. Override paths with
 `KOF_PUBLISHER_DIR` / `KOF_PUBLISHER_CLASSES` / `KOF_SQLITE_JAR`.

@@ -20,13 +20,13 @@ entity Publication {
     content: String
     status: String
     created_at: String
-    scheduledAt: String
-    publishedAt: String
+    scheduled_at: String
+    published_at: String
     target: String
     model: String
     context_version: String
-    recurrenceId: String
-    externalId: String
+    recurrence_id: String
+    external_id: String
     error: String
     occurrence_key: String unique
     attempts: Int
@@ -34,7 +34,7 @@ entity Publication {
 
 entity Occurrence {
     id: String unique
-    recurrenceId: String
+    recurrence_id: String
     occurrence_time: String
     publication_id: String
     stage: String
@@ -194,7 +194,7 @@ class Store {
     }
 
     occurrencesByRecurrence(String recurrenceId): List<Occurrence> {
-        return orm.where<Occurrence>(conn, "recurrenceId", recurrenceId)
+        return orm.where<Occurrence>(conn, "recurrence_id", recurrenceId)
     }
 
     allOccurrences(): List<Occurrence> {

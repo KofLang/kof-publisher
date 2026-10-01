@@ -1,0 +1,144 @@
+// End-to-end test of the FULL editorial pipeline against a real HTTP
+// language model — the fake LM fixture (tests/fake_lm_server.py) speaks the
+// same Ollama chat protocol over a real socket, so every layer runs for
+// real: kof.http, json.decode of the chat response, Editorial generate/
+// validate, Store (SQLite/ORM), approve, publish through the dry-run
+// target, occurrence ledger and history. Only the model itself is a
+// deterministic fixture — the pipeline has no stubs.
+//
+// Uses port 11577 so it never collides with a local Ollama on 11434.
+// Set KOF_LM_LIVE=<model> to additionally run the same flow against the
+// real daemon (lm.url default; slow models may take minutes).
+
+String envOr(String key, String dflt) {
+    var v = config.env(key)
+    if (v != null && v != "") {
+        return v
+    }
+    return dflt
+}
+
+String publisherDir() {
+    return envOr("KOF_PUBLISHER_DIR", "/home/mel/Documentos/kof-publisher")
+}
+
+String classpath() {
+    var home = envOr("HOME", "/home/mel")
+    var drv = envOr("KOF_SQLITE_JAR", home + "/.kof/deps/org/xerial/sqlite-jdbc/3.53.4.0/sqlite-jdbc-3.53.4.0.jar")
+    return envOr("KOF_PUBLISHER_CLASSES", publisherDir() + "/build/classes")
+        + ":" + home + "/.local/share/kof/lib/kof.jar:" + drv
+}
+
+String work() {
+    return "/tmp/kof-pub-tests/fakelm"
+}
+
+String lmEnv() {
+    return "KOF_LM_URL=http://127.0.0.1:11577 KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=300 KOF_LM_TIMEOUT=25 "
+}
+
+String baseEnv() {
+    return "KOF_PUBLISHER_DRYRUN_DIR=" + work() + "/dryrun "
+}
+
+String run(String cmd) {
+    var r = process.run("sh", "-c", cmd + " 2>&1")
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+Int exitOf(String blob) {
+    var i = blob.indexOf("||EXIT=")
+    if (i < 0) {
+        throw "no exit marker"
+    }
+    return blob.substring(i + 7).toInt()
+}
+
+String outOf(String blob) {
+    var i = blob.indexOf("||EXIT=")
+    return blob.substring(0, i)
+}
+
+Bool has(String hay, String needle) {
+    return hay.split(needle).length > 1
+}
+
+String cli(String env, String args) {
+    return run("cd '" + work() + "' && " + baseEnv() + env + "java -cp '" + classpath() + "' Default.Main " + args)
+}
+
+// first operand line of `list` for a status: "  pub-...  [status]  topic"
+String firstIdFor(String status) {
+    var o = cli("", "list --status " + status + " --company company.kofmd --store pub.db")
+    assert(exitOf(o) == 0, o)
+    for (var line in outOf(o).split("\n")) {
+        var t = line.trim()
+        if (t.startsWith("pub-")) {
+            var sp = t.split(" ")
+            return sp[0]
+        }
+    }
+    throw "no publication with status " + status + " in:\n" + outOf(o)
+}
+
+test "full pipeline against the fake LM (generate -> review -> approve -> publish -> history)" {
+    run("rm -rf '" + work() + "' && mkdir -p '" + work() + "'")
+    run("pkill -f 'fake_lm_serv[e]r.py 11577' || true")
+    var up = run("cd '" + work() + "' && { python3 '" + publisherDir() + "/tests/fake_lm_server.py' 11577 > lm.log 2>&1 & echo $! > lm.pid; }; sleep 1; curl -s -m 4 http://127.0.0.1:11577/api/tags | grep -c models")
+    assert(exitOf(up) == 0 && has(outOf(up), "1"), up)
+
+    var ini = cli("", "init --company company.kofmd --store pub.db")
+    assert(exitOf(ini) == 0, ini)
+
+    var gen = cli(lmEnv(), "generate --topic \"sistemas legados\" --company company.kofmd --store pub.db --target dryrun")
+    assert(exitOf(gen) == 0, gen)
+    assert(has(outOf(gen), "1 rascunho"), gen)
+
+    var id = firstIdFor("review")
+
+    var rev = cli("", "review " + id + " --company company.kofmd --store pub.db")
+    assert(exitOf(rev) == 0, rev)
+    assert(has(outOf(rev), "OK deterministico"), rev)
+    assert(has(outOf(rev), "Migrar um sistema legado"), rev)
+
+    var app = cli("", "approve " + id + " --company company.kofmd --store pub.db")
+    assert(exitOf(app) == 0, app)
+    assert(has(outOf(app), "approved"), app)
+
+    var pub = cli("", "publish " + id + " --company company.kofmd --store pub.db")
+    assert(exitOf(pub) == 0, pub)
+    assert(has(outOf(pub), "publicada"), pub)
+
+    var lst = cli("", "list --status published --company company.kofmd --store pub.db")
+    assert(exitOf(lst) == 0, lst)
+    assert(has(outOf(lst), id), lst)
+
+    var outDir = Directory(work() + "/dryrun")
+    var files = outDir.list()
+    assert(files.size() >= 1, "dryrun wrote nothing")
+    var txt = File(work() + "/dryrun/" + files[0]).readText()
+    if (txt == null) {
+        throw "dryrun file unreadable"
+    }
+    assert(has(txt, "Migrar um sistema legado"), txt)
+
+    var h = cli("", "history --company company.kofmd --store pub.db")
+    assert(exitOf(h) == 0, h)
+    assert(has(outOf(h), id), h)
+    assert(has(outOf(h), "manual-pub"), h)
+    assert(!has(outOf(h), "recurrence : null"), outOf(h))
+
+    run("kill $(cat '" + work() + "/lm.pid') 2>/dev/null || true")
+}
+
+test "live LM (optional, KOF_LM_LIVE=<model>): generate reaches the same gate" {
+    var model = envOr("KOF_LM_LIVE", "")
+    if (model == "") {
+        println("SKIP live LM test — set KOF_LM_LIVE=<model> to run it")
+        return
+    }
+    var env = "KOF_LM_MODEL=" + model + " KOF_LM_TOKENS=800 KOF_LM_TIMEOUT=1200 "
+    var gen = cli(env, "generate --topic \"observabilidade\" --company company.kofmd --store pub.db --target dryrun")
+    assert(exitOf(gen) == 0, gen)
+    assert(has(outOf(gen), "rascunho"), gen)
+}

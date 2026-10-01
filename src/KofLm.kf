@@ -34,6 +34,10 @@ Int lmTokens() {
     return config.int("lm.tokens", 800)
 }
 
+Bool lmThink() {
+    return config.bool("lm.think", false)
+}
+
 Int lmTempPercent() {
     return config.int("lm.temp", 70)
 }
@@ -63,22 +67,28 @@ LmResult lmComplete(String system, String prompt) {
         body = body + "{\"role\":\"system\",\"content\":\"" + strings.escapeJson(system) + "\"},"
     }
     body = body + "{\"role\":\"user\",\"content\":\"" + strings.escapeJson(prompt) + "\"}],"
+    if (lmThink()) {
+        body = body + "\"think\":true,"
+    } else {
+        body = body + "\"think\":false,"
+    }
     body = body + "\"stream\":false,\"options\":{\"temperature\":" + (lmTempPercent() / 100.0)
     body = body + ",\"num_predict\":" + lmTokens() + "}}"
     http.timeout(lmTimeoutSec())
     var h = spawn httpPostSafe(lmUrl() + "/api/chat", body, "Content-Type: application/json")
     var raw = ""
-    var waited = 0
     var limitMs = lmTimeoutSec() * 1000 + 10000
-    while (waited < limitMs && !done(h)) {
+    while (time.now() - t0 < limitMs && !done(h)) {
         time.sleep(50)
-        waited = waited + 50
     }
     if (done(h)) {
         var v = poll(h)
         raw = v as String
     }
     var ms = (time.now() - t0) as Int
+    if (raw.startsWith("{\"error\":")) {
+        return LmResult("", false, "lm: server error: " + strings.truncate(raw, 300), ms)
+    }
     if (raw == "") {
         return LmResult("", false, "lm: no response from /api/chat at " + lmUrl(), ms)
     }
@@ -93,6 +103,6 @@ LmResult lmComplete(String system, String prompt) {
         }
         return LmResult(text, true, "", ms)
     } catch (String e) {
-        return LmResult("", false, "lm: " + e + " | raw=" + strings.truncate(raw, 400), ms)
+        return LmResult("", false, "lm: " + e + " | url=" + lmUrl() + " | raw=" + strings.truncate(raw, 400), ms)
     }
 }

@@ -159,7 +159,8 @@ test "generate reports the KofLM outage honestly (no stacktrace)" {
     var g = cliEnv("gen", "KOF_LM_URL=http://127.0.0.1:1 ", "generate --topic backend --company company.kofmd --store pub.db")
     assert(exitOf(g) != 0, g)
     var out = outOf(g)
-    assert(!has(out, "Exception"), out)
+    assert(!has(out, "\tat "), out)
     assert(!has(out, "javafx"), out)
-    assert(has(out, "publisher") || has(out, "KofLM") || has(out, "lm"), out)
+    assert(has(out, "publisher: error: java.lang.RuntimeException"), out)
+    assert(has(out, "lm:") && has(out, "127.0.0.1:1"), out)
 }

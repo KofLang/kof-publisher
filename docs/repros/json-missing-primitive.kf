@@ -1,0 +1,29 @@
+// BUG-7 (measured 01/10, kof-cli-0.5.0-beta.jar, JVM): `json.decode<T>` of a
+// record whose PRIMITIVE field (Bool/Int/Long/Double) is ABSENT from the
+// JSON — or present as `null` — fails with the JDK-internal message instead
+// of an honest "field missing for <T>.<field>":
+//
+//   catch (String e) -> "java.lang.NullPointerException: Cannot invoke
+//   \"java.lang.Number.intValue()\" because the return value of
+//   \"sun.invoke.util.ValueConversions.primitiveConversion(...)\" is null"
+//
+// The same signature surfaces through the ORM read path when an Int column
+// holds NULL (this is what the publisher's `schedules` NPE was — fixed here
+// by giving every Int column a non-null value, not by the compiler).
+// String fields are fine (bound as null).
+record Envelope(String model, Bool done, Int n)
+
+main() {
+    try {
+        var a = json.decode<Envelope>("{\"model\":\"m\",\"done\":true}")
+        println("absent Int decoded: " + a.n())
+    } catch (String e) {
+        println("absent Int threw: " + e)
+    }
+    try {
+        var b = json.decode<Envelope>("{\"model\":\"m\",\"done\":null,\"n\":2}")
+        println("null Bool decoded: " + b.done())
+    } catch (String e) {
+        println("null Bool threw: " + e)
+    }
+}

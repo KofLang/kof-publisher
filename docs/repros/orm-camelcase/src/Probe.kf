@@ -1,0 +1,25 @@
+// BUG-8 (measured 01/10, kof-cli-0.5.0-beta.jar): the ORM READ path
+// lowercases column labels (ResultSetMetaData.getColumnLabel -> toLowerCase)
+// but entities declare camelCase fields. A String field silently binds NULL;
+// a primitive Int/Bool field dies with the JDK-internal message of BUG-7
+// (the publisher's `schedules` NPE had exactly this origin). WORKAROUND:
+// name every persisted field in lower_snake_case (src/Store.kf does).
+entity Thing { id: String unique myLabel: String myCount: Int }
+
+main() {
+    var conn = db.connect("jdbc:sqlite:/tmp/opencode/orm-camelcase/t.db")
+    orm.create<Thing>(conn)
+    orm.save(conn, Thing("1", "hello", 7))
+    try {
+        var t = orm.find<Thing>(conn, "1")
+        if (t != null) {
+            println("myLabel=" + t.myLabel())
+            println("myCount=" + t.myCount())
+        }
+    } catch (String e) {
+        println("read threw: " + e)
+    }
+    var raw = db.query(conn, "select myLabel from thing where id='1'")
+    println("raw=" + raw)
+    db.close(conn)
+}

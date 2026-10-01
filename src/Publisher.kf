@@ -255,8 +255,8 @@ Int cmdList(Store store, List<String> args) {
     println("Publisher Queue")
     for (var p in rows) {
         var schedLabel = ""
-        if (p.scheduledAt() != "") {
-            schedLabel = "  @ " + p.scheduledAt()
+        if (p.scheduled_at() != "") {
+            schedLabel = "  @ " + p.scheduled_at()
         }
         println("  " + p.id() + "  [" + p.status() + "]  " + strings.truncate(p.topic(), 44) + schedLabel)
     }
@@ -279,8 +279,8 @@ Int cmdReview(Store store, Company company, List<String> args) {
     println("model     : " + p.model())
     println("created   : " + p.created_at())
     var schedAt = ""
-    if (p.scheduledAt() != "") {
-        schedAt = "  scheduledAt=" + p.scheduledAt()
+    if (p.scheduled_at() != "") {
+        schedAt = "  scheduledAt=" + p.scheduled_at()
     }
     println("target    : " + p.target() + schedAt)
     if (p.error() != "") {
@@ -316,7 +316,7 @@ Int cmdTransition(Store store, String id, String to, String err) {
         println("publisher: transicao invalida: " + p.status() + " -> " + to + " (id " + id + ")")
         return 1
     }
-    store.savePublication(Publication(p.id(), p.company(), p.topic(), p.content(), to, p.created_at(), p.scheduledAt(), p.publishedAt(), p.target(), p.model(), p.context_version(), p.recurrenceId(), p.externalId(), err, p.occurrence_key(), p.attempts()))
+    store.savePublication(Publication(p.id(), p.company(), p.topic(), p.content(), to, p.created_at(), p.scheduled_at(), p.published_at(), p.target(), p.model(), p.context_version(), p.recurrence_id(), p.external_id(), err, p.occurrence_key(), p.attempts()))
     println("OK " + id + ": " + p.status() + " -> " + to)
     return 0
 }
@@ -463,7 +463,7 @@ Int cmdHistory(Store store, List<String> args) {
     }
     for (var o in rows) {
         println(o.id())
-        println("  recurrence : " + o.recurrenceId())
+        println("  recurrence : " + o.recurrence_id())
         println("  occurrence : " + o.occurrence_time())
         var oDetail = ""
         if (o.detail() != "") {

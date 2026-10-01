@@ -2,3 +2,6 @@ build/
 *.db
 .kof/
 *.stop
+out/
+*.log
+*.db
