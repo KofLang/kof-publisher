@@ -87,7 +87,20 @@ class Scheduler {
     List<Schedule> recoverAgenda() {
         var out = listOf<Schedule>()
         for (var s in store.activeSchedules()) {
-            var next = computeNext(s, nowStamp())
+            // Restart must NOT drop an occurrence whose instant passed while
+            // the daemon was down (acceptance: restart). A stored next that is
+            // in the future, or overdue by at most 10 minutes, is kept so the
+            // main loop runs it NOW; only empty/invalid/stale instants are
+            // recomputed forward.
+            var next = s.next_execution()
+            if (next != "") {
+                if (0 - millisUntil(next) > 600000) {
+                    next = ""
+                }
+            }
+            if (next == "") {
+                next = computeNext(s, nowStamp())
+            }
             if (next == "") {
                 log.error("agenda '" + s.name() + "': timezone '" + s.timezone() + "' indisponivel — recusa (nunca assume UTC)")
             } else {

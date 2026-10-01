@@ -37,9 +37,18 @@ String lmEnv() {
     return "KOF_LM_URL=http://127.0.0.1:11577 KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=300 KOF_LM_TIMEOUT=25 "
 }
 
-String baseEnv() {
-    return "KOF_PUBLISHER_DRYRUN_DIR=" + work() + "/dryrun "
+String lmEnv11578() {
+    return "KOF_LM_URL=http://127.0.0.1:11578 KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=300 KOF_LM_TIMEOUT=25 "
 }
+
+String daemonBaseEnv() {
+    return "KOF_PUBLISHER_HOME=" + work() + "/daemon/home KOF_PUBLISHER_DRYRUN_DIR=" + work() + "/daemon/dryrun "
+}
+
+String baseEnv() {
+    return "KOF_PUBLISHER_HOME=" + work() + "/home KOF_PUBLISHER_DRYRUN_DIR=" + work() + "/dryrun "
+}
+
 
 String run(String cmd) {
     var r = process.run("sh", "-c", cmd + " 2>&1")
@@ -64,7 +73,11 @@ Bool has(String hay, String needle) {
 }
 
 String cli(String env, String args) {
-    return run("cd '" + work() + "' && " + baseEnv() + env + "java -cp '" + classpath() + "' Default.Main " + args)
+    return cliIn(work(), env, args)
+}
+
+String cliIn(String dir, String env, String args) {
+    return run("cd '" + dir + "' && " + baseEnv() + env + "java -cp '" + classpath() + "' Default.Main " + args)
 }
 
 // first operand line of `list` for a status: "  pub-...  [status]  topic"
@@ -141,4 +154,52 @@ test "live LM (optional, KOF_LM_LIVE=<model>): generate reaches the same gate" {
     var gen = cli(env, "generate --topic \"observabilidade\" --company company.kofmd --store pub.db --target dryrun")
     assert(exitOf(gen) == 0, gen)
     assert(has(outOf(gen), "rascunho"), gen)
+}
+
+// The recurring agenda (daemon) is the acceptance centerpiece: a due
+// occurrence must generate -> validate -> publish WITHOUT the CLI, a STOP
+// file must end it cleanly, and a restarted daemon must NOT publish the
+// same occurrence twice (idempotency ledger).
+test "daemon publishes a due occurrence once and a restart does not repeat it" {
+    run("rm -rf '" + work() + "/daemon' && mkdir -p '" + work() + "/daemon'")
+    run("pkill -f 'fake_lm_serv[e]r.py 11578' || true")
+    var up = run("cd '" + work() + "/daemon' && { python3 '" + publisherDir() + "/tests/fake_lm_server.py' 11578 > lm.log 2>&1 & echo $! > lm.pid; }; sleep 1; curl -s -m 4 http://127.0.0.1:11578/api/tags | grep -c models")
+    assert(exitOf(up) == 0 && has(outOf(up), "1"), up)
+
+    var ini = cliIn(work() + "/daemon", lmEnv11578() + daemonBaseEnv(), "init --company company.kofmd --store pub.db")
+    assert(exitOf(ini) == 0, ini)
+    // Fire within ~90s: the clock has minute resolution, so +90s lands on the
+    // next (or the one after next) minute boundary in the COMPANY zone.
+    var at = run("TZ=America/Sao_Paulo date -d '+90 seconds' +%H:%M")
+    assert(exitOf(at) == 0, at)
+    var day = run("TZ=America/Sao_Paulo date +%A | tr A-Z a-z")
+    assert(exitOf(day) == 0, day)
+    var sch = cliIn(work() + "/daemon", lmEnv11578() + daemonBaseEnv(), "schedule --name loop --days " + outOf(day).trim() + " --at " + outOf(at).trim() + " --mode autonomous --target dryrun --topic legado --company company.kofmd --store pub.db")
+    assert(exitOf(sch) == 0, sch)
+
+    run("rm -f '" + work() + "/daemon/home/STOP'")
+    run("cd '" + work() + "/daemon' && { env " + baseEnv().trim() + " " + lmEnv11578() + daemonBaseEnv() + " java -cp '" + classpath() + "' Default.Main daemon --company company.kofmd --store pub.db > daemon.log 2>&1 & echo $! > daemon.pid; }")
+    var fired = run("for i in $(seq 1 60); do sleep 3; grep -q 'publicada ->' '" + work() + "/daemon/daemon.log' && exit 0; if ! kill -0 $(cat '" + work() + "/daemon/daemon.pid') 2>/dev/null; then exit 1; fi; done; exit 1")
+    assert(exitOf(fired) == 0, "daemon never published: " + run("tail -20 '" + work() + "/daemon/daemon.log'"))
+
+    run("mkdir -p '" + work() + "/daemon/home' && touch '" + work() + "/daemon/home/STOP'")
+    var gone = run("for i in $(seq 1 15); do sleep 2; kill -0 $(cat '" + work() + "/daemon/daemon.pid') 2>/dev/null || exit 0; done; exit 1")
+    assert(exitOf(gone) == 0, "daemon ignored the STOP file")
+
+    var files1 = run("ls '" + work() + "/daemon/dryrun' 2>/dev/null | wc -l")
+    assert(exitOf(files1) == 0 && outOf(files1).trim() == "1", files1)
+
+    run("rm -f '" + work() + "/daemon/home/STOP'")
+    run("cd '" + work() + "/daemon' && { env " + baseEnv().trim() + " " + lmEnv11578() + daemonBaseEnv() + " java -cp '" + classpath() + "' Default.Main daemon --company company.kofmd --store pub.db > daemon2.log 2>&1 & echo $! > daemon.pid; }")
+    var slept = run("sleep 20; mkdir -p '" + work() + "/daemon/home'; touch '" + work() + "/daemon/home/STOP'; for i in $(seq 1 15); do sleep 2; kill -0 $(cat '" + work() + "/daemon/daemon.pid') 2>/dev/null || exit 0; done; exit 1")
+    assert(exitOf(slept) == 0, "second daemon ignored STOP: " + run("tail -10 '" + work() + "/daemon/daemon2.log'"))
+
+    var files2 = run("ls '" + work() + "/daemon/dryrun' 2>/dev/null | wc -l")
+    assert(outOf(files2).trim() == "1", "restart published AGAIN (" + outOf(files2).trim() + " files)")
+    var hist = cliIn(work() + "/daemon", daemonBaseEnv(), "history --company company.kofmd --store pub.db")
+    assert(exitOf(hist) == 0, hist)
+    assert(has(outOf(hist), "loop@"), outOf(hist))
+    assert(!has(outOf(hist), "recurrence : null"), outOf(hist))
+
+    run("kill $(cat '" + work() + "/daemon/lm.pid') 2>/dev/null || true")
 }

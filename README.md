@@ -76,6 +76,13 @@ Set `KOF_LM_LIVE=<model>` to additionally drive the flow through the local
 Ollama (qwen3.5:0.8b measured ~1.5 s/token on CPU — budget `lm.timeout`
 accordingly).
 
+`tests/FakeLm.kf` also drives the DAEMON: a weekly agenda due ~90s ahead
+must fire autonomously (autonomous+dryrun), a `STOP` file must end it
+cleanly, and a restarted daemon must not publish the same occurrence twice
+(ledger `loop@<iso>` claim). `recoverAgenda` keeps a stored next occurrence
+that is in the future or overdue by <=10 min — a restart catches up, it
+never skips a due slot.
+
 `tests/Cli.kf` assumes the KofLM is OFFLINE for the outage test by injecting
 `KOF_LM_URL=http://127.0.0.1:1`; it asserts the error is reported as data
 (exit code + message), with no stacktrace. Override paths with
