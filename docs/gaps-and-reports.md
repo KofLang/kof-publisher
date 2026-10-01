@@ -7,6 +7,9 @@ built from the current tree — both tested on OpenJDK 25 (Temurin), Linux.
 
 ## BUG-6 — ORM entity in a named package: class descriptor without package (OPEN, both binaries)
 
+> Upstream: recorded as **§556** in `Kof4j/docs/bugs-and-gaps/known-bugs.md`
+> (BUG-7 → §555, BUG-8 → §554).
+
 `entity` declared in `package app`: compiler emits `Class.forName("Erec")`
 (simple name) in `kof_orm_*`, while the class file is `app/Erec.class`.
 Any `orm.find/all/where/...` on it dies at runtime:
