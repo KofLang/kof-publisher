@@ -1,0 +1,203 @@
+
+
+// State — PublicationStore.
+//
+// Persistence for publications, schedules and the occurrence ledger, backed
+// by kof.orm records over SQLite (the driver is auto-provisioned by
+// `kof run`/`kof build` via DbDrivers when `db.connect` is present).
+//
+// `occurrences` is the idempotency ledger: one row per
+// (schedule, occurrence-instant), keyed deterministically
+// (occurrenceKeyOf). The scheduler claims an occurrence BEFORE generating —
+// a restarted daemon, a second daemon, a retry or a race recomputes the SAME
+// key and finds the row: the occurrence never executes twice
+// (acceptance §12/§13: duplicate, race, restart, retry, network failure).
+
+entity Publication {
+    id: String unique
+    company: String
+    topic: String
+    content: String
+    status: String
+    created_at: String
+    scheduledAt: String
+    publishedAt: String
+    target: String
+    model: String
+    context_version: String
+    recurrenceId: String
+    externalId: String
+    error: String
+    occurrence_key: String unique
+    attempts: Int
+}
+
+entity Occurrence {
+    id: String unique
+    recurrenceId: String
+    occurrence_time: String
+    publication_id: String
+    stage: String
+    result: String
+    detail: String
+    started_at: String
+    finished_at: String
+}
+
+entity Schedule {
+    name: String unique
+    days: String
+    interval_days: Int
+    anchor_date: String
+    clock: String
+    timezone: String
+    topic: String
+    mode: String
+    target: String
+    status: String
+    next_execution: String
+    last_execution: String
+    created_at: String
+    updated_at: String
+}
+
+List<String> daysList(Schedule s) {
+    return splitJoined(s.days())
+}
+
+class Store {
+    String conn
+
+    constructor(String path) {
+        conn = db.connect("jdbc:sqlite:" + path)
+        orm.create<Publication>(conn)
+        orm.create<Schedule>(conn)
+        orm.create<Occurrence>(conn)
+    }
+
+    Int close() {
+        db.close(conn)
+        return 0
+    }
+
+    // ---- publications ----
+
+    Int savePublication(Publication p) {
+        orm.save(conn, p)
+        return 0
+    }
+
+    findPublication(String id): Publication? {
+        var v = orm.find<Publication>(conn, id)
+        if (v == null) {
+            return null
+        }
+        return v as Publication
+    }
+
+    allPublications(): List<Publication> {
+        return orm.all<Publication>(conn)
+    }
+
+    publicationsByStatus(String status): List<Publication> {
+        return orm.where<Publication>(conn, "status", status)
+    }
+
+    byOccurrenceKey(String key): Publication? {
+        var rows = orm.where<Publication>(conn, "occurrence_key", key)
+        if (rows.size() == 0) {
+            return null
+        }
+        return rows.get(0)
+    }
+
+    recentPublishedContents(Int limit): List<String> {
+        var rows = publicationsByStatus(statusPublished())
+        var out = listOf<String>()
+        var i = rows.size() - 1
+        while (i >= 0 && out.size() < limit) {
+            out.add(rows.get(i).topic() + " || " + rows.get(i).content())
+            i = i - 1
+        }
+        return out
+    }
+
+    recentTopics(Int limit): List<String> {
+        var rows = orm.all<Publication>(conn)
+        var out = listOf<String>()
+        var i = rows.size() - 1
+        while (i >= 0 && out.size() < limit) {
+            if (rows.get(i).topic() != "") {
+                out.add(rows.get(i).topic())
+            }
+            i = i - 1
+        }
+        return out
+    }
+
+    // ---- schedules ----
+
+    Int saveSchedule(Schedule s) {
+        orm.save(conn, s)
+        return 0
+    }
+
+    findSchedule(String name): Schedule? {
+        var v = orm.find<Schedule>(conn, name)
+        if (v == null) {
+            return null
+        }
+        return v as Schedule
+    }
+
+    allSchedules(): List<Schedule> {
+        return orm.all<Schedule>(conn)
+    }
+
+    activeSchedules(): List<Schedule> {
+        return orm.where<Schedule>(conn, "status", "active")
+    }
+
+    deleteSchedule(String name): Bool {
+        return orm.delete<Schedule>(conn, name)
+    }
+
+    // ---- occurrences (idempotency ledger + history) ----
+
+    // Claim an occurrence: true = this call owns it (first insert);
+    // false = already claimed/executed (duplicate protected by PK).
+    claimOccurrence(String id, String recurrenceId, String occurrenceTime, String startedAt): Bool {
+        var existing = orm.find<Occurrence>(conn, id)
+        if (existing != null) {
+            return false
+        }
+        try {
+            orm.save(conn, Occurrence(id, recurrenceId, occurrenceTime, "", "claimed", "", "", startedAt, ""))
+            return true
+        } catch (String e) {
+            // PK race (two daemons sharing the file) — someone else owns it
+            return false
+        }
+    }
+
+    Int updateOccurrence(Occurrence o) {
+        orm.save(conn, o)
+        return 0
+    }
+
+    findOccurrence(String id): Occurrence? {
+        var v = orm.find<Occurrence>(conn, id)
+        if (v == null) {
+            return null
+        }
+        return v as Occurrence
+    }
+
+    occurrencesByRecurrence(String recurrenceId): List<Occurrence> {
+        return orm.where<Occurrence>(conn, "recurrenceId", recurrenceId)
+    }
+
+    allOccurrences(): List<Occurrence> {
+        return orm.all<Occurrence>(conn)
+    }
+}

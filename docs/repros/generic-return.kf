@@ -1,0 +1,10 @@
+// BUG-4 (installed kof 0.5.0-beta): a TOP-LEVEL function with a nested
+// generic RETURN type does not parse.
+//   kof build docs/repros/generic-return.kf --target jvm
+//     error: Expected '>' after type parameters [PARSE075]
+// Same shape as a class method parses on both binaries; the dev-jar
+// (built from the current tree) also parses this file fine.
+List<List<String>> nested() {
+    return listOf<List<String>>()
+}
+main() { println(nested().size()) }

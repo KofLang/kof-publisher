@@ -1,0 +1,249 @@
+
+
+// Intelligence — ContentGenerator / EditorialValidator / TopicDiscovery.
+//
+// Four separated steps (acceptance §2: context | generation | validation |
+// revision) instead of one mega-prompt:
+//
+//   1. contextBrief  — renders the company KofMD into an editorial brief
+//   2. generate      — asks KofLM for a draft for a concrete topic
+//   3. validate      — DETERMINISTIC editorial checks (not a model vote)
+//   4. revise        — a targeted revision round when validation fails
+//
+// Deduplication (acceptance §11): recent published content is fed back as
+// "already published" so the model avoids repeating subject/argument/CTA,
+// and the validator rejects near-duplicates by prefix identity.
+
+record Validation(Bool ok, List<String> problems, List<String> warnings)
+
+String joinList(List<String> items) {
+    var out = ""
+    for (var it in items) {
+        if (out != "") {
+            out = out + "; "
+        }
+        out = out + it
+    }
+    return out
+}
+
+String systemRules() {
+    var s = "Voce e o agente editorial de uma empresa. Escreva UMA publicacao para LinkedIn."
+    s = s + " Maximo 1300 caracteres. No maximo 3 hashtags."
+    s = s + " NAO use: 'No mundo de hoje', 'Estamos vivendo uma revolucao', 'A tecnologia esta transformando'."
+    s = s + " Sem clickbait, sem frases motivacionais vazias, sem afirmacao sem evidencia, sem excesso de emoji."
+    s = s + " Escreva como um humano tecnico e direto. NUNCA mencione que o texto foi gerado por IA."
+    return s
+}
+
+// Strip model wrappers (code fences, surrounding quotes) — keep the body.
+String cleanDraft(String raw) {
+    var t = raw
+    if (raw.trim().startsWith("```")) {
+        var body = ""
+        for (var line in raw.split("\n")) {
+            var l = line.trim()
+            if (l.startsWith("```")) {
+                continue
+            }
+            if (body != "") {
+                body = body + "\n"
+            }
+            body = body + l
+        }
+        t = body
+    }
+    t = strings.normalizeWhitespace(t)
+    if (t.length >= 2 && t.startsWith("\"") && t.endsWith("\"")) {
+        t = t.substring(1, t.length - 1)
+    }
+    return t
+}
+
+// "- topic" lines -> list of topics (TopicDiscovery output format).
+List<String> parseTopics(String raw) {
+    var out = listOf<String>()
+    for (var line in raw.split("\n")) {
+        var t = line.trim()
+        if (t.startsWith("- ")) {
+            t = t.substring(2, t.length).trim()
+        }
+        if (t != "" && out.size() < 10) {
+            out.add(t)
+        }
+    }
+    return out
+}
+
+Int countHashtags(String text) {
+    var tags = 0
+    var i = 0
+    while (i < text.length) {
+        if (text.charAt(i) == 35 && i + 1 < text.length) {
+            var c = text.charAt(i + 1)
+            var isAlpha = c >= 97 && c <= 122 || c >= 65 && c <= 90
+            var atStart = i == 0 || text.charAt(i - 1) == 32 || text.charAt(i - 1) == 10
+            if (isAlpha && atStart) {
+                tags = tags + 1
+            }
+        }
+        i = i + 1
+    }
+    return tags
+}
+
+class Editorial {
+    Company company
+
+    constructor(Company company) {
+        this.company = company
+    }
+
+    // ---- 1. CONTEXT ----
+
+    String contextBrief() {
+        var b = "EMPRESA: " + company.name() + "\n"
+        if (company.description() != "") {
+            b = b + "DESCRICAO: " + company.description() + "\n"
+        }
+        if (company.positioning() != "") {
+            b = b + "POSICIONAMENTO: " + company.positioning() + "\n"
+        }
+        if (company.audiencePrimary() != "") {
+            b = b + "PUBLICO PRINCIPAL: " + company.audiencePrimary()
+            if (company.audienceSecondary() != "") {
+                b = b + " | secundario: " + company.audienceSecondary()
+            }
+            b = b + "\n"
+        }
+        if (company.products().size() > 0) {
+            b = b + "PRODUTOS: " + joinList(company.products()) + "\n"
+        }
+        if (company.topics().size() > 0) {
+            b = b + "TOPICOS EDITORIAIS: " + joinList(company.topics()) + "\n"
+        }
+        if (company.goals().size() > 0) {
+            b = b + "OBJETIVOS: " + joinList(company.goals()) + "\n"
+        }
+        if (company.avoid().size() > 0) {
+            b = b + "EVITAR (regras duras): " + joinList(company.avoid()) + "\n"
+        }
+        if (company.tone() != "") {
+            b = b + "TOM: " + company.tone() + "\n"
+        }
+        b = b + "IDIOMA: " + firstNonEmpty(company.language(), "pt-BR") + "\n"
+        return b
+    }
+
+    // ---- 2. GENERATION ----
+
+    String generate(String topic, List<String> recent, String objective) {
+        var p = contextBrief()
+        p = p + "TEMA DESTA PUBLICACAO: " + topic + "\n"
+        if (objective != "") {
+            p = p + "OBJETIVO DO CONTEUDO: " + objective + "\n"
+        }
+        if (recent.size() > 0) {
+            p = p + "JA PUBLICADO (nao repita assunto/argumento/estrutura/comeco/CTA):\n"
+            var i = 0
+            while (i < recent.size() && i < 8) {
+                p = p + "- " + strings.truncate(recent.get(i), 140) + "\n"
+                i = i + 1
+            }
+        }
+        p = p + "Escreva a publicacao agora. Responda APENAS com o texto final."
+        var r = lmComplete(systemRules(), p)
+        if (!r.ok()) {
+            throw "generate: " + r.error()
+        }
+        return cleanDraft(r.text())
+    }
+
+    // ---- TOPIC DISCOVERY (acceptance §4) ----
+
+    // Propose topics grounded in the company: a topic must relate
+    // company + audience + positioning — never opportunism.
+    List<String> discoverTopics(Int count, List<String> usedTopics) {
+        var p = contextBrief()
+        p = p + "Proponha " + count + " temas para publicar no LinkedIn.\n"
+        p = p + "Cada tema: uma linha, no maximo 12 palavras, concreto.\n"
+        p = p + "Relacione SEMPRE empresa + publico + posicionamento.\n"
+        if (usedTopics.size() > 0) {
+            p = p + "TEMAS JA USADOS (nao repita): " + joinList(usedTopics) + "\n"
+        }
+        p = p + "Responda APENAS com a lista, uma linha por tema, cada linha comecando com '- '."
+        var r = lmComplete("Voce e o descobridor de pautas de um agente editorial. Responda apenas com a lista pedida.", p)
+        if (!r.ok()) {
+            throw "discover: " + r.error()
+        }
+        return parseTopics(r.text())
+    }
+
+    // ---- 3. VALIDATION — deterministic editorial gate ----
+
+    // The checks that CAN be decided without a model live HERE (acceptance
+    // §6): length, banned openings, the company's own avoid-list, obvious
+    // repetition of recent content, hashtag spam. A failure BLOCKS the
+    // pipeline until revised or discarded — never "publish it anyway".
+    Validation validate(String draft, List<String> recent) {
+        var problems = listOf<String>()
+        var warnings = listOf<String>()
+        var text = strings.normalizeWhitespace(draft)
+        var norm = strings.toSnakeCase(asciiFold(text))
+        if (text.length < 80) {
+            problems.add("draft too short (" + text.length + " chars)")
+        }
+        if (text.length > 3000) {
+            problems.add("draft exceeds 3000 chars (" + text.length + ")")
+        }
+        if (norm.contains("no_mundo_de_hoje")) {
+            problems.add("banned opening: 'No mundo de hoje'")
+        }
+        if (norm.contains("tecnologia_esta_transformando")) {
+            problems.add("banned opening: 'A tecnologia esta transformando'")
+        }
+        if (norm.contains("estamos_vivendo_uma_revolucao")) {
+            problems.add("banned opening: 'Estamos vivendo uma revolucao'")
+        }
+        for (var avoid in company.avoid()) {
+            var needle = strings.toSnakeCase(asciiFold(avoid))
+            if (needle != "" && norm.contains(needle)) {
+                problems.add("violates company rule avoid: '" + avoid + "'")
+            }
+        }
+        var curKey = norm.substring(0, math.min(120, norm.length))
+        for (var prev in recent) {
+            var prevNorm = strings.toSnakeCase(asciiFold(prev))
+            var prevKey = prevNorm.substring(0, math.min(120, prevNorm.length))
+            if (prevKey != "" && prevKey == curKey) {
+                problems.add("near-duplicate of recent content: " + strings.truncate(prev, 60))
+            }
+        }
+        var tags = countHashtags(text)
+        if (tags > 3) {
+            problems.add("hashtag spam (" + tags + ")")
+        }
+        if (problems.size() > 0) {
+            return Validation(false, problems, warnings)
+        }
+        return Validation(true, problems, warnings)
+    }
+
+    // ---- 4. REVISION ----
+
+    // A revision round: problems are fed back with the context; the caller
+    // validates again and decides keep / revise-more / discard.
+    String revise(String draft, Validation v, List<String> recent) {
+        var p = contextBrief()
+        p = p + "TEXTO ANTERIOR:\n" + draft + "\n\nCORRIJA estes problemas e reescreva a publicacao completa:\n"
+        for (var prob in v.problems()) {
+            p = p + "- " + prob + "\n"
+        }
+        p = p + "Responda APENAS com o texto final corrigido."
+        var r = lmComplete(systemRules(), p)
+        if (!r.ok()) {
+            throw "revise: " + r.error()
+        }
+        return cleanDraft(r.text())
+    }
+}

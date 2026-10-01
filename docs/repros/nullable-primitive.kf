@@ -1,0 +1,19 @@
+// BUG-5 candidate — NOT reproduced on kof-cli-0.5.0-beta.jar nor on the
+// installed kof (01/10 re-measure: builds and runs clean on both).
+// Earlier this session a VerifyError appeared while the publisher used
+// `Int?` returns across files; keep the sentinel (-1) workaround until a
+// clean repro exists.
+Int? maybe(Int x) {
+    if (x > 0) {
+        return x
+    }
+    return null
+}
+main() {
+    var v = maybe(0)
+    if (v != null) {
+        println(v)
+    } else {
+        println("none")
+    }
+}

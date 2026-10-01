@@ -1,0 +1,382 @@
+
+
+// Scheduler — the recurring editorial agent (acceptance §7, §8, §12, §13, §22).
+//
+// KofTime defines WHEN (next occurrences computed with the calendar
+// primitives; waiting is time.sleep bounded by the computed instant); the
+// Publisher defines WHAT (generate -> validate -> review|publish -> record).
+// The daemon loop:
+//
+//   recover persisted schedules -> recompute nextExecution via KofTime
+//   -> sleep until the nearest occurrence -> for each due schedule:
+//      claim the occurrence (idempotent ledger insert)
+//      -> generate via KofLM -> validate -> revise -> review|publish
+//      -> record result -> recompute next occurrence -> loop
+//
+// No cron parser, no in-memory-only timers, no aggressive polling: the
+// agenda lives in the store, so a restarted daemon resumes it unchanged
+// (§7). A claimed occurrence is never re-run even if the process died
+// mid-way (§12 duplicate/race/restart). Retry happens INSIDE one execution
+// against the SAME stored draft — a failed publish never regenerates a
+// different post (§13).
+
+record ExecReport(String occurrenceId, String publicationId, String result, String detail)
+
+String publisherStopFile() {
+    return defaultPublisherHome() + "/STOP"
+}
+
+Bool publisherStopRequested() {
+    return File(publisherStopFile()).exists()
+}
+
+class Scheduler {
+    Store store
+    Company company
+    Int maxAttempts
+    Int attemptDelayMs
+
+    constructor(Store store, Company company) {
+        this.store = store
+        this.company = company
+        maxAttempts = config.int("publisher.attempts", 3)
+        attemptDelayMs = config.int("publisher.attempt.delay.ms", 2000)
+    }
+
+    // Effective mode: schedule override > company mode > SAFE DEFAULT
+    // "assisted" — autonomous is explicitly opt-in (§9).
+    String effectiveMode(Schedule s) {
+        if (s.mode() != "") {
+            return s.mode()
+        }
+        if (company.mode() != "") {
+            return company.mode()
+        }
+        return "assisted"
+    }
+
+    String nowStamp() {
+        var sp = localOf(company.timezone(), time.now())
+        if (sp == null) {
+            throw "company timezone '" + company.timezone() + "' unavailable on this runtime"
+        }
+        return isoOf(sp)
+    }
+
+    // ---- agenda persistence ----
+
+    Schedule register(Schedule s) {
+        var existing = store.findSchedule(s.name())
+        var created = nowStamp()
+        if (existing != null) {
+            created = existing.created_at()
+        }
+        var next = computeNext(s, created)
+        if (next == "") {
+            throw "schedule '" + s.name() + "': cannot compute next occurrence — timezone '" + s.timezone() + "' unavailable or days/at invalid"
+        }
+        var saved = Schedule(s.name(), s.days(), s.interval_days(), s.anchor_date(), s.clock(), s.timezone(), s.topic(), s.mode(), s.target(), "active", next, "", created, nowStamp())
+        store.saveSchedule(saved)
+        observability.increment("publisher.schedule.created", 1)
+        log.info("agenda '" + saved.name() + "' registrada: proxima ocorrencia " + next)
+        return saved
+    }
+
+    // Restart recovery: reload persisted schedules, recompute the next
+    // execution through KofTime. The agenda survives the process (§7).
+    List<Schedule> recoverAgenda() {
+        var out = listOf<Schedule>()
+        for (var s in store.activeSchedules()) {
+            var next = computeNext(s, nowStamp())
+            if (next == "") {
+                log.error("agenda '" + s.name() + "': timezone '" + s.timezone() + "' indisponivel — recusa (nunca assume UTC)")
+            } else {
+                var fixed = Schedule(s.name(), s.days(), s.interval_days(), s.anchor_date(), s.clock(), s.timezone(), s.topic(), s.mode(), s.target(), s.status(), next, s.last_execution(), s.created_at(), nowStamp())
+                store.saveSchedule(fixed)
+                out.add(fixed)
+                log.info("agenda '" + s.name() + "' recuperada: proxima ocorrencia " + next)
+            }
+        }
+        return out
+    }
+
+    Bool cancelSchedule(String name) {
+        var found = store.findSchedule(name)
+        if (found == null) {
+            return false
+        }
+        var s = found
+        store.saveSchedule(Schedule(name, s.days(), s.interval_days(), s.anchor_date(), s.clock(), s.timezone(), s.topic(), s.mode(), s.target(), "cancelled", "", s.last_execution(), s.created_at(), nowStamp()))
+        return true
+    }
+
+    // ---- next occurrence (the KofTime consumer) ----
+
+    String computeNext(Schedule s, String fromIso) {
+        var from = spanFromIso(fromIso)
+        if (from == null) {
+            from = localOf(s.timezone(), time.now())
+        }
+        if (from == null) {
+            return ""
+        }
+        var clock = parseClock(s.clock())
+        if (clock < 0) {
+            return ""
+        }
+        var hour = clock / 60
+        var minute = clock % 60
+        if (s.interval_days() > 0) {
+            var anchor = s.anchor_date()
+            if (anchor == "") {
+                anchor = from.date()
+            }
+            var r = nextIntervalDue(from, anchor, s.interval_days(), hour, minute, s.timezone())
+            if (r != null) {
+                return isoOf(r)
+            }
+            return ""
+        }
+        var rules = listOf<Weekly>()
+        for (var d in daysList(s)) {
+            var wd = weekdayFromName(d)
+            if (wd < 0) {
+                return ""
+            }
+            rules.add(Weekly(wd, hour, minute))
+        }
+        if (rules.size() == 0) {
+            return ""
+        }
+        var best = nextDue(from, rules, s.timezone())
+        if (best != null) {
+            return isoOf(best)
+        }
+        return ""
+    }
+
+    // Millis until an occurrence ISO stamp (the stored EXPLICIT offset is
+    // honored — never assumes UTC).
+    Long millisUntil(String occIso) {
+        var sp = spanFromIso(occIso)
+        if (sp == null) {
+            return 0
+        }
+        return localToUtc(sp) - time.now()
+    }
+
+    // ---- one occurrence: the full pipeline ----
+
+    ExecReport runOccurrence(Schedule s, String occIso) {
+        var key = occurrenceKeyOf(s.name(), occIso)
+        var started = nowStamp()
+        if (!store.claimOccurrence(key, s.name(), occIso, started)) {
+            log.info("ocorrencia " + key + " ja reivindicada — ignorando (idempotente: duplicate/restart/race)")
+            return ExecReport(key, "", "skipped", "already claimed")
+        }
+        observability.increment("publisher.schedule.triggered", 1)
+        var recent = store.recentPublishedContents(8)
+        var topic = pickTopic(s, recent)
+        var ed = Editorial(company)
+        var mode = effectiveMode(s)
+        var target = targetName(s)
+        var pubId = "pub-" + strings.slugify(key)
+        var existingPub = store.byOccurrenceKey(key)
+        var content = ""
+        if (existingPub != null) {
+            // retry of a recorded draft — the publication keeps its identity
+            content = existingPub.content()
+            pubId = existingPub.id()
+        } else {
+            var v = Validation(false, listOf<String>("nothing generated"), listOf<String>())
+            var round = 0
+            while (round < 3) {
+                var draft = ed.generate(topic, recent, "conteudo recorrente da agenda '" + s.name() + "'")
+                v = ed.validate(draft, recent)
+                if (v.ok()) {
+                    content = draft
+                    break
+                }
+                draft = ed.revise(draft, v, recent)
+                var v2 = ed.validate(draft, recent)
+                if (v2.ok()) {
+                    content = draft
+                    v = v2
+                    break
+                }
+                v = v2
+                round = round + 1
+            }
+            if (content == "") {
+                store.updateOccurrence(Occurrence(key, s.name(), occIso, "", "validation", "failed", joinList(v.problems()), started, nowStamp()))
+                observability.increment("publisher.content.rejected", 1)
+                log.error("ocorrencia " + key + ": validacao falhou — descartada: " + joinList(v.problems()))
+                return ExecReport(key, "", "failed", "validation: " + joinList(v.problems()))
+            }
+            observability.increment("publisher.content.generated", 1)
+            observability.increment("publisher.content.validated", 1)
+            store.updateOccurrence(Occurrence(key, s.name(), occIso, pubId, "generation", "success", "", started, ""))
+            var status = statusApproved()
+            if (mode == "assisted") {
+                status = statusReview()
+            }
+            store.savePublication(Publication(pubId, company.name(), topic, content, status, nowStamp(), occIso, "", target, lmModel(), company.digest(), s.name(), "", "", key, 0))
+        }
+        if (mode == "assisted") {
+            store.updateOccurrence(Occurrence(key, s.name(), occIso, pubId, "review", "awaiting", "", started, ""))
+            log.info("ocorrencia " + key + ": rascunho " + pubId + " em REVIEW aguardando aprovacao humana (assisted)")
+            return ExecReport(key, pubId, "review", "awaiting approval")
+        }
+        return publishWithRetry(key, s.name(), occIso, pubId, topic, content, started, target)
+    }
+
+    // Controlled retry: attempt -> backoff -> attempt -> ... -> FAILED.
+    // Regenerating on a publish failure is FORBIDDEN (§13): the same draft
+    // is re-published; the occurrence keeps its identity.
+    ExecReport publishWithRetry(String key, String schedName, String occIso, String pubId, String topic, String content, String started, String targetName) {
+        var pub = store.findPublication(pubId)
+        var createdAt = started
+        var company1 = company.name()
+        var ctx = company.digest()
+        if (pub != null) {
+            createdAt = pub.created_at()
+            company1 = pub.company()
+            ctx = pub.context_version()
+        }
+        var target = resolveTarget(targetName)
+        if (target == null) {
+            var msg = targetErrorPrefix(targetName) + " desconhecido"
+            store.updateOccurrence(Occurrence(key, schedName, occIso, pubId, "publication", "failed", msg, started, nowStamp()))
+            log.error("ocorrencia " + key + ": " + msg)
+            return ExecReport(key, pubId, "failed", msg)
+        }
+        var attempt = 1
+        var delay = attemptDelayMs
+        var lastError = ""
+        while (attempt <= maxAttempts) {
+            store.savePublication(Publication(pubId, company1, topic, content, statusPublishing(), createdAt, occIso, "", targetName, lmModel(), ctx, schedName, "", "", key, attempt))
+            observability.increment("publisher.publication.started", 1)
+            try {
+                var out = target.publish(content)
+                store.savePublication(Publication(pubId, company1, topic, content, statusPublished(), createdAt, occIso, nowStamp(), targetName, lmModel(), ctx, schedName, out.externalId(), "", key, attempt))
+                store.updateOccurrence(Occurrence(key, schedName, occIso, pubId, "publication", "success", out.externalId(), started, nowStamp()))
+                observability.increment("publisher.publication.completed", 1)
+                log.info("ocorrencia " + key + ": publicada -> " + out.externalId())
+                return ExecReport(key, pubId, "published", out.externalId())
+            } catch (String e) {
+                lastError = e
+                observability.increment("publisher.publication.failed", 1)
+                log.warn("ocorrencia " + key + ": tentativa " + attempt + "/" + maxAttempts + " falhou: " + e)
+                if (attempt < maxAttempts) {
+                    time.sleep(delay)
+                    delay = delay * 2
+                }
+            }
+            attempt = attempt + 1
+        }
+        store.savePublication(Publication(pubId, company1, topic, content, statusFailed(), createdAt, occIso, "", targetName, lmModel(), ctx, schedName, "", lastError, key, maxAttempts))
+        store.updateOccurrence(Occurrence(key, schedName, occIso, pubId, "publication", "failed", lastError, started, nowStamp()))
+        log.error("ocorrencia " + key + ": FAILED apos " + maxAttempts + " tentativas — " + lastError)
+        return ExecReport(key, pubId, "failed", lastError)
+    }
+
+    // Topic selection (TopicDiscovery consumer): explicit schedule topic wins;
+    // else company topics rotated against recent content; else KofLM discovery.
+    String pickTopic(Schedule s, List<String> recent) {
+        if (s.topic() != "") {
+            return s.topic()
+        }
+        var topics = company.topics()
+        if (topics.size() == 0) {
+            var disc = Editorial(company).discoverTopics(5, store.recentTopics(20))
+            if (disc.size() > 0) {
+                return disc.get(0)
+            }
+            throw "sem topicos: company.kofmd nao declara topics e a descoberta via KofLM falhou"
+        }
+        var used = setOf<String>()
+        for (var r in recent) {
+            used.add(r)
+        }
+        for (var t in topics) {
+            if (!used.contains(t)) {
+                return t
+            }
+        }
+        return topics.get(0)
+    }
+
+    String targetName(Schedule s) {
+        if (s.target() == "") {
+            return "linkedin"
+        }
+        return s.target()
+    }
+
+    // ---- daemon loop ----
+
+    Int runForever() {
+        recoverAgenda()
+        while (true) {
+            var active = store.activeSchedules()
+            if (active.size() == 0) {
+                log.warn("daemon: nenhuma agenda ativa — use 'publisher schedule' (aguardando)")
+                time.sleep(5000)
+                if (publisherStopRequested()) {
+                    return 0
+                }
+                continue
+            }
+            var bestDelayMs = 999999999999L
+            var due = listOf<Schedule>()
+            for (var item in active) {
+                var s = item
+                if (s.next_execution() == "") {
+                    var recomputed = computeNext(s, nowStamp())
+                    if (recomputed != "") {
+                        store.saveSchedule(Schedule(s.name(), s.days(), s.interval_days(), s.anchor_date(), s.clock(), s.timezone(), s.topic(), s.mode(), s.target(), s.status(), recomputed, s.last_execution(), s.created_at(), nowStamp()))
+                        var found = store.findSchedule(s.name())
+                        if (found != null) {
+                            s = found
+                        }
+                    }
+                }
+                if (s.next_execution() == "") {
+                    continue
+                }
+                var delay = millisUntil(s.next_execution())
+                if (delay <= 0) {
+                    due.add(s)
+                } else if (delay < bestDelayMs) {
+                    bestDelayMs = delay
+                }
+            }
+            if (due.size() > 0) {
+                for (var s2 in due) {
+                    var occIso = s2.next_execution()
+                    var report = runOccurrence(s2, occIso)
+                    var next = computeNext(s2, occIso)
+                    store.saveSchedule(Schedule(s2.name(), s2.days(), s2.interval_days(), s2.anchor_date(), s2.clock(), s2.timezone(), s2.topic(), s2.mode(), s2.target(), s2.status(), next, occIso, s2.created_at(), nowStamp()))
+                    log.info("agenda '" + s2.name() + "': ocorrencia " + occIso + " -> " + report.result() + "; proxima: " + next)
+                }
+            } else {
+                var sleepMs = bestDelayMs
+                if (sleepMs > 30000L) {
+                    sleepMs = 30000L
+                }
+                if (sleepMs < 250L) {
+                    sleepMs = 250L
+                }
+                var slept = 0L
+                while (slept < sleepMs) {
+                    time.sleep(200)
+                    slept = slept + 200L
+                    if (publisherStopRequested()) {
+                        log.info("daemon: stop solicitado — encerrando limpo")
+                        return 0
+                    }
+                }
+            }
+        }
+    }
+}

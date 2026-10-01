@@ -1,0 +1,103 @@
+
+// Model — the persistable publication + occurrence + schedule records.
+//
+// Status lifecycle (never publish outside a valid state — enforced by
+// isPublishable): IDEA -> DRAFT -> REVIEW -> APPROVED -> SCHEDULED ->
+// PUBLISHING -> PUBLISHED; terminal/other: REJECTED, CANCELLED, FAILED.
+// Timestamps are stored as ISO-8601 with EXPLICIT offset (e.g.
+// 2026-10-05T09:00:00-03:00) — never bare, never silent UTC.
+
+String statusIdea() { return "idea" }
+String statusDraft() { return "draft" }
+String statusReview() { return "review" }
+String statusApproved() { return "approved" }
+String statusScheduled() { return "scheduled" }
+String statusPublishing() { return "publishing" }
+String statusPublished() { return "published" }
+String statusRejected() { return "rejected" }
+String statusCancelled() { return "cancelled" }
+String statusFailed() { return "failed" }
+
+// The ONLY states a target may publish from.
+Bool isPublishable(String status) {
+    return status == statusApproved() || status == statusScheduled()
+}
+
+Bool isTerminal(String status) {
+    return status == statusPublished() || status == statusRejected() || status == statusCancelled() || status == statusFailed()
+}
+
+// Valid forward moves of the lifecycle.
+Bool validTransition(String from, String to) {
+    if (from == statusIdea()) {
+        return to == statusDraft() || to == statusCancelled()
+    }
+    if (from == statusDraft()) {
+        return to == statusReview() || to == statusRejected() || to == statusCancelled() || to == statusFailed()
+    }
+    if (from == statusReview()) {
+        return to == statusApproved() || to == statusRejected() || to == statusDraft() || to == statusCancelled() || to == statusFailed()
+    }
+    if (from == statusApproved()) {
+        return to == statusScheduled() || to == statusPublishing() || to == statusCancelled() || to == statusRejected() || to == statusFailed()
+    }
+    if (from == statusScheduled()) {
+        return to == statusPublishing() || to == statusCancelled() || to == statusRejected() || to == statusFailed()
+    }
+    if (from == statusPublishing()) {
+        return to == statusPublished() || to == statusFailed()
+    }
+    return false
+}
+
+// Deterministic identity of one recurrence occurrence:
+// "<schedule-name>@<scheduled-at-iso>". A restarted daemon recomputing the
+// same occurrence hits the same key and the occurrence table dedups it.
+String occurrenceKeyOf(String scheduleName, String scheduledAtIso) {
+    return scheduleName + "@" + scheduledAtIso
+}
+
+List<String> splitJoined(String raw) {
+    var out = listOf<String>()
+    if (raw == "") {
+        return out
+    }
+    for (var part in raw.split(",")) {
+        var t = part.trim()
+        if (t != "") {
+            out.add(t)
+        }
+    }
+    return out
+}
+
+String joinedOf(List<String> items) {
+    var out = ""
+    for (var it in items) {
+        if (out != "") {
+            out = out + ","
+        }
+        out = out + it
+    }
+    return out
+}
+
+test "occurrence keys are deterministic" {
+    assert(occurrenceKeyOf("technical", "2026-03-30T09:00:00-03:00") == "technical@2026-03-30T09:00:00-03:00")
+    assert(occurrenceKeyOf("technical", "2026-03-30T09:00:00-03:00") == occurrenceKeyOf("technical", "2026-03-30T09:00:00-03:00"))
+}
+
+test "only approved and scheduled are publishable" {
+    assert(isPublishable(statusApproved()), "approved")
+    assert(isPublishable(statusScheduled()), "scheduled")
+    assert(!isPublishable(statusReview()), "review")
+    assert(!isPublishable(statusDraft()), "draft")
+}
+
+test "status transitions are closed" {
+    assert(validTransition(statusReview(), statusApproved()))
+    assert(validTransition(statusApproved(), statusPublishing()))
+    assert(validTransition(statusPublishing(), statusPublished()))
+    assert(!validTransition(statusDraft(), statusPublished()))
+    assert(!validTransition(statusPublished(), statusDraft()))
+}

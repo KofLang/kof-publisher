@@ -1,0 +1,98 @@
+
+// KofLM — client surface for the language model.
+//
+// There is NO `kof.lm` in the Kof stdlib (0.5.0-beta measured — see
+// docs/gaps-and-reports.md GAP-3). This file is the smallest KofLM surface the
+// Publisher needs, built on the real `kof.http` + `kof.json`, currently bound
+// to the OpenAI-compatible / Ollama chat protocol (localhost:11434).
+// A different engine is a different URL — the Publisher core never talks to a
+// model directly; it goes through `lmComplete` (see docs/gaps-and-reports.md).
+//
+// HTTP calls run behind `spawn` + a function that catches `Exception` and
+// turns the Java failure into a String. The Kof HTTP verbs do not wrap JDK
+// failures (docs/gaps-and-reports.md BUG-3), but `catch (Exception e)` does:
+// the publisher process survives a refused/timed-out request and reports the
+// real cause (no JavaFX-style masking).
+
+record LmMsg(String role, String content)
+record LmChatResp(String model, LmMsg message, Bool done)
+record LmResult(String text, Bool ok, String error, Int ms)
+
+String lmUrl() {
+    return config.str("lm.url", "http://localhost:11434")
+}
+
+String lmModel() {
+    return config.str("lm.model", "qwen3.5:0.8b")
+}
+
+Int lmTimeoutSec() {
+    return config.int("lm.timeout", 120)
+}
+
+Int lmTokens() {
+    return config.int("lm.tokens", 800)
+}
+
+Int lmTempPercent() {
+    return config.int("lm.temp", 70)
+}
+
+Bool lmAvailable() {
+    http.timeout(5)
+    try {
+        return http.status(lmUrl() + "/api/tags") == 200
+    } catch (Exception e) {
+        return false
+    }
+}
+
+String httpPostSafe(String url, String body, String contentType) {
+    try {
+        return http.post(url, body, contentType)
+    } catch (Exception e) {
+        return e.toString()
+    }
+}
+
+// Complete one exchange: system rules + user prompt -> raw model text.
+LmResult lmComplete(String system, String prompt) {
+    var t0 = time.now()
+    var body = "{\"model\":\"" + strings.escapeJson(lmModel()) + "\",\"messages\":["
+    if (system != "") {
+        body = body + "{\"role\":\"system\",\"content\":\"" + strings.escapeJson(system) + "\"},"
+    }
+    body = body + "{\"role\":\"user\",\"content\":\"" + strings.escapeJson(prompt) + "\"}],"
+    body = body + "\"stream\":false,\"options\":{\"temperature\":" + (lmTempPercent() / 100.0)
+    body = body + ",\"num_predict\":" + lmTokens() + "}}"
+    http.timeout(lmTimeoutSec())
+    var h = spawn httpPostSafe(lmUrl() + "/api/chat", body, "Content-Type: application/json")
+    var raw = ""
+    var waited = 0
+    var limitMs = lmTimeoutSec() * 1000 + 10000
+    while (waited < limitMs && !done(h)) {
+        time.sleep(50)
+        waited = waited + 50
+    }
+    if (done(h)) {
+        var v = poll(h)
+        raw = v as String
+    }
+    var ms = (time.now() - t0) as Int
+    if (raw == "") {
+        return LmResult("", false, "lm: no response from /api/chat at " + lmUrl(), ms)
+    }
+    try {
+        var resp = json.decode<LmChatResp>(raw)
+        if (resp.message() == null) {
+            return LmResult("", false, "lm: response without message", ms)
+        }
+        var text = resp.message().content()
+        if (text == null) {
+            return LmResult("", false, "lm: response without message.content", ms)
+        }
+        return LmResult(text, true, "", ms)
+    } catch (String e) {
+        return LmResult("", false, "lm: " + e + " | raw=" + strings.truncate(raw, 400), ms)
+    }
+}

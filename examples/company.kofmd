@@ -1,0 +1,56 @@
+# company
+
+name: Minha Empresa
+description: Empresa de engenharia de software.
+
+# audience
+
+audience_primary: CTOs e lideres tecnicos
+audience_secondary: desenvolvedores
+
+# positioning
+
+positioning: Construímos software simples, performático e sustentável.
+
+# topics
+
+topics:
+  - Java
+  - backend
+  - arquitetura
+  - sistemas legados
+  - performance
+
+# voice
+
+language: pt-BR
+tone: direto, tecnico e humano
+
+# avoid
+
+avoid:
+  - marketing generico
+  - buzzwords
+  - clickbait
+  - frases motivacionais vazias
+
+# goals
+
+goals:
+  - aumentar autoridade tecnica
+  - gerar conversas
+
+# publishing
+
+timezone: America/Sao_Paulo
+mode: assisted
+target: linkedin
+
+# schedule technical
+
+days:
+  - monday
+  - wednesday
+  - friday
+at: 09:00
+topic: sistemas legados

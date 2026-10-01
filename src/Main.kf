@@ -1,0 +1,3 @@
+main(args: List<String>) {
+    process.exit(publisherMain(args))
+}

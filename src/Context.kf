@@ -1,0 +1,321 @@
+
+import kofmd.Kofmd
+
+// Context — WHY the company publishes.
+//
+// The Company KofMD is parsed by the OFFICIAL KofMD library (pure-Kof
+// libs/kofmd, vendored byte-identical under src/kofmd — see
+// docs/gaps-and-reports.md GAP-2/GAP-5). The Publisher does NOT re-implement
+// a markdown parser: it binds flat KofMD typed fields + list fields to an
+// editorial model.
+//
+// KofMD is deliberately flat: `key: value` splits at the FIRST colon; a
+// nested `monday: 09:00` under a `schedule:` field would parse as the STRING
+// "monday: 09:00". The spec-legal encoding for schedules therefore uses
+// KofMD LIST fields:
+//
+//   # publishing
+//   timezone: America/Sao_Paulo
+//   mode: autonomous
+//
+//   # schedule technical
+//   days:
+//     - monday
+//     - wednesday
+//     - friday
+//   at: 09:00
+//   topic: backend
+//
+// The section convention ("# <section>" opens a scope; the fields/list items
+// under it belong to it) is a Publisher-side reading convention on top of
+// inert KofMD prose headings (spec §6.5) — not a second language, not YAML
+// in disguise.
+//
+// NOTE: a top-level function whose RETURN type nests a generic parameter
+// (`Map<String, List<String>> f()`) fails to PARSE in 0.5.0-beta (PARSE075 —
+// real Kof4j bug, minimal repro + full matrix in
+// docs/gaps-and-reports.md BUG-4; a class method with the identical
+// signature parses). The section reader therefore lives as an instance
+// method of `CompanySections` (which also carries real state: the parsed
+// doc) — this is a workaround pinned by a bug report, not ceremony.
+
+record Company(
+    String path,
+    String name,
+    String description,
+    String audiencePrimary,
+    String audienceSecondary,
+    String positioning,
+    String language,
+    String tone,
+    String mode,
+    String timezone,
+    String publishingTarget,
+    List<String> products,
+    List<String> topics,
+    List<String> avoid,
+    List<String> goals,
+    List<Schedule> schedules,
+    String digest)
+
+String firstNonEmpty(String a, String b) {
+    if (a != "") {
+        return a
+    }
+    return b
+}
+
+String globalField(List<Section> secs, String key) {
+    var found = ""
+    for (var s in secs) {
+        var i = 0
+        while (i < s.keys().size()) {
+            if (s.keys().get(i) == key) {
+                found = s.values().get(i)
+            }
+            i = i + 1
+        }
+    }
+    return found
+}
+
+List<String> globalList(List<Section> secs, String key) {
+    var out = listOf<String>()
+    for (var s in secs) {
+        var i = 0
+        while (i < s.lkeys().size()) {
+            if (s.lkeys().get(i) == key) {
+                out = splitJoined(s.lvalues().get(i))
+            }
+            i = i + 1
+        }
+    }
+    return out
+}
+
+String sectionField(List<Section> secs, String secName, String key) {
+    for (var s in secs) {
+        if (s.name() != secName) {
+            continue
+        }
+        var i = 0
+        while (i < s.keys().size()) {
+            if (s.keys().get(i) == key) {
+                return s.values().get(i)
+            }
+            i = i + 1
+        }
+    }
+    return ""
+}
+
+List<String> sectionList(List<Section> secs, String secName, String key) {
+    for (var s in secs) {
+        if (s.name() != secName) {
+            continue
+        }
+        var i = 0
+        while (i < s.lkeys().size()) {
+            if (s.lkeys().get(i) == key) {
+                return splitJoined(s.lvalues().get(i))
+            }
+            i = i + 1
+        }
+    }
+    return listOf<String>()
+}
+
+// Stable content digest (FNV-1a 32-bit over the raw text) — the
+// contextVersion stamped on every publication generated from this file.
+String digestText(String text) {
+    var h = 2166136261
+    var i = 0
+    while (i < text.length) {
+        var c = text.charAt(i)
+        h = h * 16777619
+        h = h ^ c
+        i = i + 1
+    }
+    var v = h
+    if (v < 0) {
+        v = -v
+    }
+    return "v" + strings.padLeft("" + v, 8, "0")
+}
+
+// One named KofMD section: scalar fields (keys/values) and list fields
+// (lkeys/lvalues parallel). The name comes from the "# heading" text.
+record Section(
+    String name,
+    List<String> keys,
+    List<String> values,
+    List<String> lkeys,
+    List<String> lvalues)
+
+// Section reader (see BUG-4 note above).
+class CompanySections {
+    KofmdDoc doc
+
+    constructor(KofmdDoc doc) {
+        this.doc = doc
+    }
+
+    List<Section> all() {
+        var out = listOf<Section>()
+        var current = ""
+        var keys = listOf<String>()
+        var values = listOf<String>()
+        var lkeys = listOf<String>()
+        var lvalues = listOf<String>()
+        for (var b in doc.blocks()) {
+            for (var p in b.prose()) {
+                var t = p.trim()
+                if (t.startsWith("# ")) {
+                    if (current != "") {
+                        out.add(Section(current, keys, values, lkeys, lvalues))
+                    }
+                    current = strings.toKebabCase(t.substring(2, t.length))
+                    keys = listOf<String>()
+                    values = listOf<String>()
+                    lkeys = listOf<String>()
+                    lvalues = listOf<String>()
+                }
+            }
+            for (var fl in b.fields()) {
+                if (current == "") {
+                    continue
+                }
+                if (fl.value() != "") {
+                    keys.add(fl.name())
+                    values.add(fl.value())
+                }
+                if (fl.items().size() > 0) {
+                    lkeys.add(fl.name())
+                    lvalues.add(joinedOf(fl.items()))
+                }
+            }
+        }
+        if (current != "") {
+            out.add(Section(current, keys, values, lkeys, lvalues))
+        }
+        return out
+    }
+}
+
+List<Schedule> schedulesOf(List<Section> secs, String defaultTz, String defaultMode) {
+    var out = listOf<Schedule>()
+    for (var s in secs) {
+        if (!s.name().startsWith("schedule")) {
+            continue
+        }
+        var name = "default"
+        var dash = s.name().indexOf("-")
+        if (dash >= 0) {
+            name = s.name().substring(dash + 1, s.name().length)
+        }
+        var days = sectionList(secs, s.name(), "days")
+        var day1 = sectionField(secs, s.name(), "day")
+        if (day1 != "") {
+            days.add(day1)
+        }
+        var every = sectionField(secs, s.name(), "every")
+        var interval = 0
+        if (every != "") {
+            if (!strings.isNumeric(every)) {
+                throw "schedule '" + name + "': 'every' must be a day count"
+            }
+            interval = toIntStr(every)
+        }
+        var tz = firstNonEmpty(sectionField(secs, s.name(), "timezone"), defaultTz)
+        var mode = firstNonEmpty(sectionField(secs, s.name(), "mode"), defaultMode)
+        if (mode == "") {
+            mode = "assisted"
+        }
+        if (days.size() == 0 && interval == 0) {
+            throw "schedule '" + name + "': needs 'days' (list) or 'every' (interval days)"
+        }
+        var at = sectionField(secs, s.name(), "at")
+        var clock = parseClock(at)
+        if (clock < 0) {
+            throw "schedule '" + name + "': invalid 'at' '" + at + "' (expected HH:MM)"
+        }
+        var anchor = sectionField(secs, s.name(), "anchor")
+        for (var d in days) {
+            if (weekdayFromName(d) < 0) {
+                throw "schedule '" + name + "': unknown day '" + d + "'"
+            }
+        }
+        var topic = sectionField(secs, s.name(), "topic")
+        var target = sectionField(secs, s.name(), "target")
+        out.add(Schedule(name, joinedOf(days), interval, anchor, at, tz, topic, mode, target, "active", "", "", "", ""))
+    }
+    return out
+}
+
+// Parse a company .md (KofMD) file into the editorial model. Honest String
+// errors on anything structural — no silent defaults for identity fields.
+Company loadCompany(String path) {
+    var f = File(path)
+    var raw = f.readText()
+    if (raw == null) {
+        throw "company file not readable: " + path
+    }
+    var tool = KofmdTool()
+    var doc = tool.parse(raw)
+    var schemas = tool.parseSchemas(raw)
+    var companySchema = findSchema(schemas, "Company")
+    if (companySchema != null) {
+        var diags = tool.validateDoc(doc, companySchema)
+        if (diags.size() > 0) {
+            throw "company.kofmd schema: " + diags.get(0)
+        }
+    }
+    var secs = CompanySections(doc).all()
+    var name = globalField(secs, "name")
+    if (name == "") {
+        throw "company.kofmd: field 'name' is required (section # company)"
+    }
+    var mode = firstNonEmpty(sectionField(secs, "publishing", "mode"), globalField(secs, "mode"))
+    if (mode != "" && mode != "assisted" && mode != "autonomous") {
+        throw "company.kofmd: publishing mode '" + mode + "' invalid (use assisted|autonomous)"
+    }
+    // Timezone must be explicit — the Publisher never assumes UTC silently.
+    var tz = firstNonEmpty(sectionField(secs, "publishing", "timezone"), globalField(secs, "timezone"))
+    if (tz == "") {
+        throw "company.kofmd: publishing.timezone is required (explicit IANA zone, e.g. America/Sao_Paulo)"
+    }
+    if (!isValidZone(tz)) {
+        throw "company.kofmd: invalid timezone '" + tz + "' (use e.g. America/Sao_Paulo)"
+    }
+    if (!validOffset(zoneOffsetHours(tz, time.now()))) {
+        throw "company.kofmd: timezone '" + tz + "' unavailable on this runtime — refusing to assume UTC"
+    }
+    var target0 = firstNonEmpty(sectionField(secs, "publishing", "target"), globalField(secs, "target"))
+    return Company(
+        path,
+        name,
+        globalField(secs, "description"),
+        globalField(secs, "audience_primary"),
+        globalField(secs, "audience_secondary"),
+        globalField(secs, "positioning"),
+        globalField(secs, "language"),
+        globalField(secs, "tone"),
+        mode,
+        tz,
+        target0,
+        globalList(secs, "products"),
+        globalList(secs, "topics"),
+        globalList(secs, "avoid"),
+        globalList(secs, "goals"),
+        schedulesOf(secs, tz, mode),
+        digestText(raw))
+}
+
+KofmdSchema? findSchema(List<KofmdSchema> schemas, String name) {
+    for (var s in schemas) {
+        if (s.name() == name) {
+            return s
+        }
+    }
+    return null
+}

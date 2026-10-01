@@ -1,0 +1,545 @@
+
+
+// CLI — `kof publisher <command>` entry (acceptance §10).
+//
+// Hand-rolled dispatch in the exact Kof CLI house style (top-level
+// functions, int exit codes, strict flags — the dev.kof.cli pattern). The
+// standalone entry is `kof run src/Main.kf -- publisher <cmd> ...`.
+// Registering a first-class `kof publisher` subcommand means a
+// CmdPublisher line in kof-cli's Main switch, which lives in Kof4j and is
+// maintainer-gated (docs/gaps-and-reports.md GAP-4).
+
+String publisherUsage() {
+    var u = "usage: kof publisher <command> [options]\n"
+    u = u + "  init                       create company.kofmd template + state home\n"
+    u = u + "  check                      validate company.kofmd + KofLM availability\n"
+    u = u + "  generate [--topic t] [--ideas N] [--publish-ok]  drafts via KofLM\n"
+    u = u + "  list [--status s]          the publication queue\n"
+    u = u + "  review <id>                show draft + deterministic validation\n"
+    u = u + "  approve <id> | reject <id> lifecycle\n"
+    u = u + "  publish <id>               publish an APPROVED/SCHEDULED publication\n"
+    u = u + "  cancel <id|schedule-name>  cancel a publication or an agenda\n"
+    u = u + "  schedule --name n --days mon,wed,fri --at 09:00 [--timezone z] [--topic t] [--mode m] [--target tg] [--every N] [--anchor d]\n"
+    u = u + "  schedules                  persisted agendas + next occurrences\n"
+    u = u + "  sync                       load the # schedule blocks of company.kofmd\n"
+    u = u + "  daemon                     run the recurring agenda (STOP file / Ctrl-C)\n"
+    u = u + "  history [--schedule n]     occurrence history\n"
+    u = u + "global: --company <file>  --store <db>\n"
+    return u
+}
+
+List<String> argsTail(List<String> args) {
+    var out = listOf<String>()
+    var i = 1
+    while (i < args.size()) {
+        out.add(args.get(i))
+        i = i + 1
+    }
+    return out
+}
+
+String flagValue(List<String> args, String flag, String dflt) {
+    var i = 0
+    while (i < args.size()) {
+        var a = args.get(i)
+        if (a.startsWith(flag + "=")) {
+            return a.substring(flag.length + 1, a.length)
+        }
+        if (a == flag && i + 1 < args.size()) {
+            return args.get(i + 1)
+        }
+        i = i + 1
+    }
+    return dflt
+}
+
+Bool hasFlag(List<String> args, String flag) {
+    for (var a in args) {
+        if (a == flag) {
+            return true
+        }
+    }
+    return false
+}
+
+String firstOperand(List<String> args) {
+    for (var a in args) {
+        if (!a.startsWith("--")) {
+            return a
+        }
+    }
+    return ""
+}
+
+// ---- commands ----
+
+String companyTemplate() {
+    var t = "# company\n\n"
+    t = t + "name: Minha Empresa\n"
+    t = t + "description: Empresa de engenharia de software.\n\n"
+    t = t + "# audience\n\n"
+    t = t + "audience_primary: CTOs e lideres tecnicos\n"
+    t = t + "audience_secondary: desenvolvedores\n\n"
+    t = t + "# positioning\n\n"
+    t = t + "positioning: Construímos software simples, performático e sustentável.\n\n"
+    t = t + "# topics\n\n"
+    t = t + "topics:\n"
+    t = t + "  - Java\n"
+    t = t + "  - backend\n"
+    t = t + "  - arquitetura\n"
+    t = t + "  - sistemas legados\n"
+    t = t + "  - performance\n\n"
+    t = t + "# voice\n\n"
+    t = t + "language: pt-BR\n"
+    t = t + "tone: direto, tecnico e humano\n\n"
+    t = t + "# avoid\n\n"
+    t = t + "avoid:\n"
+    t = t + "  - marketing generico\n"
+    t = t + "  - buzzwords\n"
+    t = t + "  - clickbait\n"
+    t = t + "  - frases motivacionais vazias\n\n"
+    t = t + "# goals\n\n"
+    t = t + "goals:\n"
+    t = t + "  - aumentar autoridade tecnica\n"
+    t = t + "  - gerar conversas\n\n"
+    t = t + "# publishing\n\n"
+    t = t + "timezone: America/Sao_Paulo\n"
+    t = t + "mode: assisted\n"
+    t = t + "target: linkedin\n\n"
+    t = t + "# schedule technical\n\n"
+    t = t + "days:\n"
+    t = t + "  - monday\n"
+    t = t + "  - wednesday\n"
+    t = t + "  - friday\n"
+    t = t + "at: 09:00\n"
+    t = t + "topic: sistemas legados\n"
+    return t
+}
+
+Int cmdInit(String storePath, String companyPath) {
+    var f = File(companyPath)
+    if (f.exists()) {
+        println("publisher: " + companyPath + " already exists (not overwriting)")
+        return 0
+    }
+    var parent = Path(storePath).parent()
+    if (parent != null) {
+        Directory(parent).createDirectories()
+    }
+    var ok = f.writeText(companyTemplate())
+    if (!ok) {
+        println("publisher: falhou criar " + companyPath)
+        return 1
+    }
+    println("OK  " + companyPath + " criado — edite a identidade editorial da empresa")
+    println("OK  estado em " + storePath)
+    println("    proximo passo: publisher check && publisher generate")
+    return 0
+}
+
+Int cmdCheck(Store store, Company company) {
+    println("company      : " + company.name())
+    println("mode         : " + firstNonEmpty(company.mode(), "assisted (default)"))
+    println("timezone     : " + company.timezone())
+    println("context      : " + company.digest())
+    println("topics       : " + joinList(company.topics()))
+    println("schedules    : " + company.schedules().size())
+    var sched = Scheduler(store, company)
+    for (var s in company.schedules()) {
+        var next = sched.computeNext(s, "")
+        var nextLabel = next
+        if (next == "") {
+            nextLabel = "RECUSA (timezone indisponivel)"
+        }
+        println("  - " + s.name() + " days=" + s.days() + " at=" + s.clock() + " proxima=" + nextLabel)
+    }
+    if (lmAvailable()) {
+        println("KofLM        : OK (" + lmModel() + " @ " + lmUrl() + ")")
+        return 0
+    }
+    println("KofLM        : indisponivel em " + lmUrl() + " — configure lm.url/lm.model")
+    return 1
+}
+
+Int cmdGenerate(Store store, Company company, List<String> args) {
+    var topic = flagValue(args, "--topic", "")
+    var ideas = 1
+    var rawIdeas = flagValue(args, "--ideas", "1")
+    if (strings.isNumeric(rawIdeas)) {
+        ideas = toIntStr(rawIdeas)
+    }
+    var ed = Editorial(company)
+    var sched = Scheduler(store, company)
+    var recent = store.recentPublishedContents(8)
+    var targetName = flagValue(args, "--target", firstNonEmpty(company.publishingTarget(), "linkedin"))
+    var produced = 0
+    if (topic == "") {
+        var proposed = ed.discoverTopics(ideas, store.recentTopics(20))
+        if (proposed.size() == 0) {
+            println("publisher: nenhuma pauta descoberta")
+            return 1
+        }
+        println("OK " + proposed.size() + " topicos descobertos")
+        for (var t in proposed) {
+            if (produced >= ideas) {
+                break
+            }
+            produced = produced + generateOne(store, sched, ed, company, t, recent, hasFlag(args, "--publish-ok"), targetName)
+            recent = store.recentPublishedContents(8)
+        }
+    } else {
+        produced = generateOne(store, sched, ed, company, topic, recent, hasFlag(args, "--publish-ok"), targetName)
+    }
+    println("OK " + produced + " rascunho(s) gerado(s) e validado(s)")
+    if (produced == 0) {
+        return 1
+    }
+    return 0
+}
+
+Int generateOne(Store store, Scheduler sched, Editorial ed, Company company, String topic, List<String> recent, Bool autoPublish, String targetName) {
+    var draft = ""
+    var v = Validation(false, listOf<String>("nada gerado"), listOf<String>())
+    var round = 0
+    while (round < 2) {
+        draft = ed.generate(topic, recent, "conteudo gerado sob demanda via CLI")
+        v = ed.validate(draft, recent)
+        if (v.ok()) {
+            break
+        }
+        draft = ed.revise(draft, v, recent)
+        v = ed.validate(draft, recent)
+        round = round + 1
+    }
+    if (!v.ok()) {
+        println("FAIL '" + strings.truncate(topic, 40) + "' rejeitado pela validacao: " + joinList(v.problems()))
+        return 0
+    }
+    observability.increment("publisher.content.generated", 1)
+    observability.increment("publisher.content.validated", 1)
+    var id = "pub-" + strings.slugify(topic) + "-" + strings.truncate(uuid.v4(), 8)
+    var status = statusReview()
+    if (autoPublish) {
+        status = statusApproved()
+    }
+    var now = sched.nowStamp()
+    store.savePublication(Publication(id, company.name(), topic, draft, status, now, "", "", targetName, lmModel(), company.digest(), "", "", "", "", 0))
+    println("OK " + id + "  [" + status + "]  " + strings.truncate(topic, 48))
+    if (autoPublish) {
+        var rep = sched.publishWithRetry("cli-" + id, "cli", "", id, topic, draft, now, targetName)
+        var detail = ""
+        if (rep.detail() != "") {
+            detail = " (" + rep.detail() + ")"
+        }
+        println("   publish: " + rep.result() + detail)
+    }
+    return 1
+}
+
+Int cmdList(Store store, List<String> args) {
+    var status = flagValue(args, "--status", "")
+    var rows = listOf<Publication>()
+    if (status == "") {
+        rows = store.allPublications()
+    } else {
+        rows = store.publicationsByStatus(status)
+    }
+    if (rows.size() == 0) {
+        var statusLabel = ""
+        if (status != "") {
+            statusLabel = " com status '" + status + "'"
+        }
+        println("publisher: nenhuma publicacao" + statusLabel)
+        return 0
+    }
+    println("Publisher Queue")
+    for (var p in rows) {
+        var schedLabel = ""
+        if (p.scheduledAt() != "") {
+            schedLabel = "  @ " + p.scheduledAt()
+        }
+        println("  " + p.id() + "  [" + p.status() + "]  " + strings.truncate(p.topic(), 44) + schedLabel)
+    }
+    println("" + rows.size() + " item(ns)")
+    return 0
+}
+
+Int cmdReview(Store store, Company company, List<String> args) {
+    var id = firstOperand(args)
+    var found = store.findPublication(id)
+    if (found == null) {
+        println("publisher: publicacao nao encontrada: " + id)
+        return 1
+    }
+    var p = found
+    println("id        : " + p.id())
+    println("status    : " + p.status())
+    println("topic     : " + p.topic())
+    println("company   : " + p.company() + " (" + p.context_version() + ")")
+    println("model     : " + p.model())
+    println("created   : " + p.created_at())
+    var schedAt = ""
+    if (p.scheduledAt() != "") {
+        schedAt = "  scheduledAt=" + p.scheduledAt()
+    }
+    println("target    : " + p.target() + schedAt)
+    if (p.error() != "") {
+        println("error     : " + p.error())
+    }
+    println("---- conteudo ----")
+    println(p.content())
+    println("---- validacao ----")
+    var v = Editorial(company).validate(p.content(), store.recentPublishedContents(8))
+    if (v.ok()) {
+        println("OK deterministico: aprovado")
+    } else {
+        println("FAIL: " + joinList(v.problems()))
+    }
+    for (var w in v.warnings()) {
+        println("warn: " + w)
+    }
+    if (p.status() == statusReview()) {
+        println("")
+        println("aprovar?  publisher approve " + p.id())
+    }
+    return 0
+}
+
+Int cmdTransition(Store store, String id, String to, String err) {
+    var found = store.findPublication(id)
+    if (found == null) {
+        println("publisher: publicacao nao encontrada: " + id)
+        return 1
+    }
+    var p = found
+    if (!validTransition(p.status(), to)) {
+        println("publisher: transicao invalida: " + p.status() + " -> " + to + " (id " + id + ")")
+        return 1
+    }
+    store.savePublication(Publication(p.id(), p.company(), p.topic(), p.content(), to, p.created_at(), p.scheduledAt(), p.publishedAt(), p.target(), p.model(), p.context_version(), p.recurrenceId(), p.externalId(), err, p.occurrence_key(), p.attempts()))
+    println("OK " + id + ": " + p.status() + " -> " + to)
+    return 0
+}
+
+Int cmdCancel(Store store, Company company, String id) {
+    if (id == "") {
+        println("publisher: cancel <id> | cancel <schedule-name> — falta o identificador")
+        return 1
+    }
+    var rc = cmdTransition(store, id, statusCancelled(), "cancelado na CLI")
+    if (rc == 0) {
+        return 0
+    }
+    if (Scheduler(store, company).cancelSchedule(id)) {
+        println("OK agenda '" + id + "' cancelada")
+        return 0
+    }
+    println("publisher: nada para cancelar com esse id/nome: " + id)
+    return 1
+}
+
+Int cmdPublish(Store store, Company company, String id) {
+    var found = store.findPublication(id)
+    if (found == null) {
+        println("publisher: publicacao nao encontrada: " + id)
+        return 1
+    }
+    var p = found
+    // The state gate (§4): only APPROVED/SCHEDULED may publish — the engine
+    // refuses anything else, including drafts that "look fine".
+    if (!isPublishable(p.status())) {
+        println("publisher: recusada — status '" + p.status() + "' nao e publicavel (requer approved|scheduled)")
+        return 1
+    }
+    var sched = Scheduler(store, company)
+    var rep = sched.publishWithRetry("manual-" + id, "manual", "", p.id(), p.topic(), p.content(), sched.nowStamp(), p.target())
+    if (rep.result() == "published") {
+        println("OK " + p.id() + " publicada: " + rep.detail())
+        return 0
+    }
+    println("FAIL " + p.id() + ": " + rep.result() + " — " + rep.detail())
+    return 1
+}
+
+Int cmdSchedule(Store store, Company company, List<String> args) {
+    var name = flagValue(args, "--name", "default")
+    var daysRaw = flagValue(args, "--days", "")
+    var at = flagValue(args, "--at", flagValue(args, "--time", ""))
+    var every = flagValue(args, "--every", "")
+    var tz = flagValue(args, "--timezone", company.timezone())
+    if (at == "") {
+        println("publisher: schedule requer --at HH:MM com --days monday,wednesday,friday OU --every N")
+        return 1
+    }
+    var days = listOf<String>()
+    if (daysRaw != "") {
+        for (var d in daysRaw.split(",")) {
+            var t = d.trim()
+            if (t != "") {
+                days.add(t)
+            }
+        }
+    }
+    if (days.size() == 0 && every == "") {
+        println("publisher: schedule requer --days <lista> OU --every <dias>")
+        return 1
+    }
+    var interval = 0
+    var anchor = ""
+    if (every != "") {
+        if (!strings.isNumeric(every)) {
+            println("publisher: --every deve ser um numero de dias")
+            return 1
+        }
+        interval = toIntStr(every)
+        anchor = flagValue(args, "--anchor", time.todayIso())
+    }
+    var mode = flagValue(args, "--mode", "")
+    if (mode != "" && mode != "assisted" && mode != "autonomous") {
+        println("publisher: --mode deve ser assisted ou autonomous")
+        return 1
+    }
+    var topic = flagValue(args, "--topic", "")
+    var target = flagValue(args, "--target", "")
+    var saved = Scheduler(store, company).register(Schedule(name, joinedOf(days), interval, anchor, at, tz, topic, mode, target, "active", "", "", "", ""))
+    println("OK agenda '" + saved.name() + "'")
+    println("   days=" + saved.days() + " every=" + saved.interval_days() + " at=" + saved.clock() + " tz=" + saved.timezone())
+    println("   proxima ocorrencia: " + saved.next_execution())
+    return 0
+}
+
+Int cmdSchedules(Store store) {
+    var rows = store.allSchedules()
+    if (rows.size() == 0) {
+        println("publisher: nenhuma agenda (publisher schedule ... ou declare # schedule em company.kofmd + sync)")
+        return 0
+    }
+    for (var s in rows) {
+        println("  " + s.name() + "  [" + s.status() + "]  days=" + s.days() + " every=" + s.interval_days() + " at=" + s.clock() + " tz=" + s.timezone())
+        var lastLabel = ""
+        if (s.last_execution() != "") {
+            lastLabel = "  ultima=" + s.last_execution()
+        }
+        println("     proxima=" + s.next_execution() + lastLabel)
+    }
+    return 0
+}
+
+Int cmdSync(Store store, Company company) {
+    if (company.schedules().size() == 0) {
+        println("publisher: nenhum bloco '# schedule <nome>' em " + company.path())
+        return 0
+    }
+    var sched = Scheduler(store, company)
+    for (var s in company.schedules()) {
+        var merged = s
+        if (merged.target() == "") {
+            merged = Schedule(s.name(), s.days(), s.interval_days(), s.anchor_date(), s.clock(), s.timezone(), s.topic(), s.mode(), company.publishingTarget(), "active", "", "", "", "")
+        }
+        var saved = sched.register(merged)
+        println("OK agenda '" + saved.name() + "' sincronizada: proxima " + saved.next_execution())
+    }
+    return 0
+}
+
+Int cmdDaemon(Store store, Company company) {
+    var sched = Scheduler(store, company)
+    println("kof publisher daemon: " + sched.recoverAgenda().size() + " agenda(s) recuperada(s); encerre com " + publisherStopFile() + " ou Ctrl-C")
+    sched.runForever()
+    return 0
+}
+
+Int cmdHistory(Store store, List<String> args) {
+    var name = flagValue(args, "--schedule", "")
+    var rows = listOf<Occurrence>()
+    if (name == "") {
+        rows = store.allOccurrences()
+    } else {
+        rows = store.occurrencesByRecurrence(name)
+    }
+    if (rows.size() == 0) {
+        println("publisher: sem historico")
+        return 0
+    }
+    for (var o in rows) {
+        println(o.id())
+        println("  recurrence : " + o.recurrenceId())
+        println("  occurrence : " + o.occurrence_time())
+        var oDetail = ""
+        if (o.detail() != "") {
+            oDetail = "  (" + strings.truncate(o.detail(), 120) + ")"
+        }
+        println("  stage      : " + o.stage() + "  result: " + o.result() + oDetail)
+        println("  publication: " + o.publication_id())
+        println("  started    : " + o.started_at() + "  finished: " + o.finished_at())
+    }
+    return 0
+}
+
+Int publisherMain(List<String> args) {
+    if (args.size() == 0 || args.get(0) == "help" || args.get(0) == "--help") {
+        print(publisherUsage())
+        return 0
+    }
+    var cmd = args.get(0)
+    var rest = argsTail(args)
+    var companyPath = flagValue(rest, "--company", "company.kofmd")
+    var storePath = flagValue(rest, "--store", config.str("publisher.store", defaultPublisherHome() + "/publisher.db"))
+    try {
+        if (cmd == "init") {
+            return cmdInit(storePath, companyPath)
+        }
+        var company = loadCompany(companyPath)
+        if (cmd == "check") {
+            var store = Store(storePath)
+            return cmdCheck(store, company)
+        }
+        var store = Store(storePath)
+        try {
+            if (cmd == "generate") {
+                return cmdGenerate(store, company, rest)
+            }
+            if (cmd == "list") {
+                return cmdList(store, rest)
+            }
+            if (cmd == "review") {
+                return cmdReview(store, company, rest)
+            }
+            if (cmd == "approve") {
+                return cmdTransition(store, firstOperand(rest), statusApproved(), "")
+            }
+            if (cmd == "reject") {
+                return cmdTransition(store, firstOperand(rest), statusRejected(), "rejeitado na CLI")
+            }
+            if (cmd == "cancel") {
+                return cmdCancel(store, company, firstOperand(rest))
+            }
+            if (cmd == "publish") {
+                return cmdPublish(store, company, firstOperand(rest))
+            }
+            if (cmd == "schedule") {
+                return cmdSchedule(store, company, rest)
+            }
+            if (cmd == "schedules") {
+                return cmdSchedules(store)
+            }
+            if (cmd == "sync") {
+                return cmdSync(store, company)
+            }
+            if (cmd == "daemon") {
+                return cmdDaemon(store, company)
+            }
+            if (cmd == "history") {
+                return cmdHistory(store, rest)
+            }
+        } finally {
+            store.close()
+        }
+        println("publisher: unknown command: " + cmd)
+        print(publisherUsage())
+        return 1
+    } catch (Throwable e) {
+        println("publisher: error: " + e.toString())
+        return 1
+    }
+}

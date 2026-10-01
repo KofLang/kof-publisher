@@ -1,0 +1,165 @@
+// End-to-end tests for the publisher CLI: every scenario spawns the REAL
+// built binary (`kof build src --target jvm`, classpath below) with a fresh
+// temp store — nothing is stubbed. KofLM is expected OFFLINE on this machine:
+// `generate` must answer with the honest "indisponivel" error, never a Java
+// stacktrace (acceptance: failures are data, not crashes).
+//
+// Env overrides:
+//   KOF_PUBLISHER_DIR     project root (default /home/mel/Documentos/kof-publisher)
+//   KOF_PUBLISHER_CLASSES compiled classes dir (default <dir>/build/classes)
+//   KOF_SQLITE_JAR        sqlite-jdbc jar (default ~/.kof/deps/... 3.53.4.0)
+
+String envOr(String key, String dflt) {
+    var v = config.env(key)
+    if (v != null && v != "") {
+        return v
+    }
+    return dflt
+}
+
+String publisherDir() {
+    return envOr("KOF_PUBLISHER_DIR", "/home/mel/Documentos/kof-publisher")
+}
+
+String classpath() {
+    var home = envOr("HOME", "/home/mel")
+    var drv = envOr("KOF_SQLITE_JAR", home + "/.kof/deps/org/xerial/sqlite-jdbc/3.53.4.0/sqlite-jdbc-3.53.4.0.jar")
+    return envOr("KOF_PUBLISHER_CLASSES", publisherDir() + "/build/classes")
+        + ":" + home + "/.local/share/kof/lib/kof.jar:" + drv
+}
+
+String workDir(String name) {
+    return "/tmp/kof-pub-tests/" + name
+}
+
+void prepare(String name) {
+    var r = process.run("sh", "-c", "rm -rf '" + workDir(name) + "' && mkdir -p '" + workDir(name) + "'")
+    assert(r.exitCode == 0, "prepare " + name + ": " + r.stderr)
+}
+
+String cli(String name, String args) {
+    return cliEnv(name, "", args)
+}
+
+String cliEnv(String name, String env, String args) {
+    var cmd = "cd '" + workDir(name) + "' && " + env + "java -cp '" + classpath() + "' Default.Main " + args + " 2>&1"
+    var r = process.run("sh", "-c", cmd)
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+Int exitOf(String blob) {
+    var i = blob.indexOf("||EXIT=")
+    if (i < 0) {
+        throw "no exit marker"
+    }
+    return blob.substring(i + 7).toInt()
+}
+
+String outOf(String blob) {
+    var i = blob.indexOf("||EXIT=")
+    return blob.substring(0, i)
+}
+
+Bool has(String hay, String needle) {
+    return hay.split(needle).length > 1
+}
+
+Int countOf(String hay, String needle) {
+    return hay.split(needle).length - 1
+}
+
+test "init creates company; state opens on first store command" {
+    prepare("init")
+    var o = cli("init", "init --company company.kofmd --store pub.db")
+    assert(exitOf(o) == 0, o)
+    assert(has(outOf(o), "OK"), outOf(o))
+    assert(File(workDir("init") + "/company.kofmd").exists(), "company.kofmd")
+    var l = cli("init", "list --company company.kofmd --store pub.db")
+    assert(exitOf(l) == 0, l)
+    assert(File(workDir("init") + "/pub.db").exists(), "pub.db")
+}
+
+test "check validates the template offline" {
+    prepare("check")
+    var o = cli("check", "init --company company.kofmd --store pub.db")
+    assert(exitOf(o) == 0, o)
+    var c = cli("check", "check --company company.kofmd --store pub.db")
+    assert(exitOf(c) == 0, c)
+    assert(has(outOf(c), "America/Sao_Paulo"), outOf(c))
+    assert(has(outOf(c), "KofLM"), outOf(c))
+}
+
+test "check refuses an unknown timezone" {
+    prepare("badtz")
+    var o = cli("badtz", "init --company company.kofmd --store pub.db")
+    assert(exitOf(o) == 0, o)
+    var f = File(workDir("badtz") + "/company.kofmd")
+    var t = f.readText()
+    if (t == null) {
+        throw "readText returned null"
+    }
+    assert(t.split("timezone: America/Sao_Paulo").length == 2, "template line present")
+    var replaced = t.replace("timezone: America/Sao_Paulo", "timezone: Terra/Marte")
+    assert(replaced != t, "replace failed")
+    f.writeText(replaced)
+    var c = cli("badtz", "check --company company.kofmd --store pub.db")
+    assert(has(outOf(c), "RECUSA") || exitOf(c) != 0, c)
+}
+
+test "schedule is idempotent and sync keeps one agenda" {
+    prepare("sched")
+    assert(exitOf(cli("sched", "init --company company.kofmd --store pub.db")) == 0)
+    var s1 = cli("sched", "schedule --name technical --days monday,wednesday,friday --at 09:00 --company company.kofmd --store pub.db")
+    assert(exitOf(s1) == 0, s1)
+    var s2 = cli("sched", "schedule --name technical --days monday,wednesday,friday --at 09:00 --company company.kofmd --store pub.db")
+    assert(exitOf(s2) == 0, s2)
+    var l = cli("sched", "schedules --company company.kofmd --store pub.db")
+    assert(exitOf(l) == 0, l)
+    assert(countOf(outOf(l), "technical") == 1, outOf(l))
+    var sy = cli("sched", "sync --company company.kofmd --store pub.db")
+    assert(exitOf(sy) == 0, sy)
+    var l2 = cli("sched", "schedules --company company.kofmd --store pub.db")
+    assert(exitOf(l2) == 0, l2)
+    assert(countOf(outOf(l2), "technical") == 1, outOf(l2))
+}
+
+test "weekly schedule computes the next occurrence in the named zone" {
+    prepare("next")
+    assert(exitOf(cli("next", "init --company company.kofmd --store pub.db")) == 0)
+    var s = cli("next", "schedule --name technical --days monday --at 09:00 --company company.kofmd --store pub.db")
+    assert(exitOf(s) == 0, s)
+    var l = cli("next", "schedules --company company.kofmd --store pub.db")
+    assert(exitOf(l) == 0, l)
+    assert(has(outOf(l), "-03:00"), outOf(l))
+    assert(has(outOf(l), "T09:00:00"), outOf(l))
+}
+
+test "empty queue reports none and history is readable" {
+    prepare("empty")
+    assert(exitOf(cli("empty", "init --company company.kofmd --store pub.db")) == 0)
+    var ls = cli("empty", "list --company company.kofmd --store pub.db")
+    assert(exitOf(ls) == 0, ls)
+    assert(has(outOf(ls), "nenhuma"), outOf(ls))
+    var h = cli("empty", "history --company company.kofmd --store pub.db")
+    assert(exitOf(h) == 0, h)
+}
+
+test "approve/reject/publish on a missing id fail with a real error" {
+    prepare("missing")
+    assert(exitOf(cli("missing", "init --company company.kofmd --store pub.db")) == 0)
+    var a = cli("missing", "approve does-not-exist --company company.kofmd --store pub.db")
+    assert(exitOf(a) != 0, a)
+    var p = cli("missing", "publish does-not-exist --company company.kofmd --store pub.db")
+    assert(exitOf(p) != 0, p)
+}
+
+test "generate reports the KofLM outage honestly (no stacktrace)" {
+    prepare("gen")
+    assert(exitOf(cli("gen", "init --company company.kofmd --store pub.db")) == 0)
+    var g = cliEnv("gen", "KOF_LM_URL=http://127.0.0.1:1 ", "generate --topic backend --company company.kofmd --store pub.db")
+    assert(exitOf(g) != 0, g)
+    var out = outOf(g)
+    assert(!has(out, "Exception"), out)
+    assert(!has(out, "javafx"), out)
+    assert(has(out, "publisher") || has(out, "KofLM") || has(out, "lm"), out)
+}

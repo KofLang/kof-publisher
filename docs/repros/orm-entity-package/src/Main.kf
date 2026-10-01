@@ -1,0 +1,4 @@
+import app.Db
+main() {
+    process.exit(runOrm())
+}

@@ -1,0 +1,22 @@
+// BUG-6 (measured 01/10 on kof-cli-0.5.0-beta.jar, JVM): an `entity` declared
+// in a NAMED package is emitted with its BINARY name missing the package —
+// kof_orm_* calls Class.forName("Erec") while the class file is app/Erec.
+//   java -jar kof-cli-0.5.0-beta.jar build src --target jvm
+//   java -cp out:... Default.Main   →  NoClassDefFoundError: Erec
+// Workaround used by this project: entities live in the ROOT package
+// (src/Store.kf), which also makes them un-importable from a separate test
+// root — state is therefore tested through the real CLI (tests/Cli.kf).
+entity Erec { id: String unique v: String n: Int }
+
+Int runOrm() {
+    var conn = db.connect("jdbc:sqlite:/tmp/orm-entity-package.db")
+    orm.create<Erec>(conn)
+    orm.save(conn, Erec("1", "x", 5))
+    var got = orm.find<Erec>(conn, "1")
+    if (got != null && got.v() == "x" && got.n() == 5) {
+        db.close(conn)
+        return 0
+    }
+    db.close(conn)
+    return 1
+}

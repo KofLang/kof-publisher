@@ -1,0 +1,169 @@
+
+// Where — PublicationTarget.
+//
+// The Publisher core only knows this interface (acceptance §14/§16): publish
+// a text, return the external id or throw a String error. LinkedIn is ONE
+// target; blog/mastodon/x/rss plug into the same slot without touching the
+// editorial engine.
+//
+// Credentials NEVER live in the company .md (acceptance §17): the LinkedIn
+// token is read via `secrets.get("LINKEDIN_ACCESS_TOKEN")` — env
+// KOF_LINKEDIN_ACCESS_TOKEN > kof.config — the Kof secrets face
+// (kof.secrets). The value is never logged; error output goes through
+// secrets.redact.
+//
+// HTTP runs behind spawn+poll: the JDK exception that escapes a timed-out
+// or refused request (the http verbs do NOT wrap JDK failures — see
+// docs/gaps-and-reports.md BUG-3) is caught as a String and surfaced with
+// its REAL cause. Never masked, never silent, never a "JavaFX-style"
+// launcher lie.
+
+record PublishOutcome(String externalId, String raw)
+
+interface PublicationTarget {
+    String name()
+    PublishOutcome publish(String text)
+}
+
+String defaultPublisherHome() {
+    var cfg = config.str("publisher.home", "")
+    if (cfg != "") {
+        return cfg
+    }
+    var h = config.env("HOME")
+    var home = ""
+    if (h != null) {
+        home = h
+    }
+    if (home == "") {
+        return ".kof/publisher"
+    }
+    return home + "/.kof/publisher"
+}
+
+String targetErrorPrefix(String target) {
+    return "target '" + target + "'"
+}
+
+// ---- dry-run target (tests + `--target dryrun`) ----
+// Writes the publication text to a directory and returns a local id. It is
+// an honest offline target — the real network face below is what
+// `--target linkedin` uses; the dry target does NOT stand in for it.
+class DryRunTarget implements PublicationTarget {
+    String dir
+
+    constructor(String dir) {
+        this.dir = dir
+    }
+
+    String name() {
+        return "dryrun"
+    }
+
+    PublishOutcome publish(String text) {
+        var d = Directory(dir)
+        d.createDirectories()
+        var id = "dryrun-" + uuid.v4()
+        var ok = File(dir + "/" + id + ".md").writeText(text + "\n")
+        if (!ok) {
+            throw "dryrun: falhou a escrita em " + dir
+        }
+        return PublishOutcome(id, "")
+    }
+}
+
+// ---- LinkedIn (first concrete target) ----
+// POST https://api.linkedin.com/v2/ugcPosts (restli payload).
+class LinkedInTarget implements PublicationTarget {
+    String authorUrn
+    String apiUrl
+
+    constructor(String authorUrn, String apiUrl) {
+        this.authorUrn = authorUrn
+        this.apiUrl = apiUrl
+    }
+
+    String name() {
+        return "linkedin"
+    }
+
+    String bodyFor(String text) {
+        return "{\"author\":\"" + authorUrn + "\",\"lifecycleState\":\"PUBLISHED\",\"specificContent\":{\"com.linkedin.ugc.ShareContent\":{\"shareCommentary\":{\"text\":\""
+            + strings.escapeJson(text) + "\"},\"shareMediaCategory\":\"NONE\"}},\"visibility\":{\"com.linkedin.ugc.MemberNetworkVisibility\":\"PUBLIC\"}}"
+    }
+
+    PublishOutcome publish(String text) {
+        var token = secrets.get("LINKEDIN_ACCESS_TOKEN", "")
+        if (token == "") {
+            throw "linkedin: LINKEDIN_ACCESS_TOKEN missing (env KOF_LINKEDIN_ACCESS_TOKEN) — credentials NEVER go in the company .md"
+        }
+        http.timeout(30)
+        var h = spawn http.post(apiUrl + "/v2/ugcPosts", bodyFor(text),
+            "Content-Type: application/json",
+            "Authorization: Bearer " + token,
+            "X-Restli-Protocol-Version: 2.0.0",
+            "LinkedIn-Version: 202506")
+        var waited = 0
+        var raw = ""
+        var died = false
+        while (waited < 40000 && !done(h)) {
+            time.sleep(50)
+            waited = waited + 50
+        }
+        if (done(h)) {
+            try {
+                raw = poll(h)
+            } catch (String e) {
+                died = true
+                raw = e
+            }
+        } else {
+            died = true
+            raw = "linkedin: request still running after 40s (network failure?)"
+        }
+        if (died) {
+            throw "linkedin publish failed: " + secrets.redact(raw)
+        }
+        var id = extractLinkedId(raw)
+        if (id != "") {
+            return PublishOutcome(id, raw)
+        }
+        throw "linkedin publish rejected: " + secrets.redact(strings.truncate(raw, 400))
+    }
+}
+
+// The LinkedIn response body carries "id":"urn:li:share:...". A 4xx/5xx
+// error envelope has no id -> "" -> caller reports failure.
+String extractLinkedId(String raw) {
+    var marker = "\"id\":\""
+    var i = raw.indexOf(marker)
+    if (i < 0) {
+        return ""
+    }
+    var start = i + marker.length
+    var end = raw.indexOf("\"", start)
+    if (end < 0) {
+        return ""
+    }
+    return raw.substring(start, end)
+}
+
+// LinkedIn target from secrets/config (throws a named error if missing).
+PublicationTarget linkedInFromSecrets() {
+    var urn = secrets.get("LINKEDIN_AUTHOR_URN", "")
+    if (urn == "") {
+        throw "linkedin: LINKEDIN_AUTHOR_URN missing (env KOF_LINKEDIN_AUTHOR_URN or kof.config)"
+    }
+    var url = config.str("linkedin.api", "https://api.linkedin.com")
+    return LinkedInTarget(urn, url)
+}
+
+PublicationTarget? resolveTarget(String name) {
+    if (name == "" || name == "linkedin") {
+        return linkedInFromSecrets()
+    }
+    if (name == "dryrun") {
+        return DryRunTarget(config.str("publisher.dryrun.dir", defaultPublisherHome() + "/dryrun"))
+    }
+    return null
+}

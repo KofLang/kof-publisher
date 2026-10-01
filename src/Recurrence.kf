@@ -1,0 +1,407 @@
+
+import java.time.ZoneId
+import java.time.Instant
+
+// Recurrence — WHEN to publish.
+//
+// This is the Publisher's consumer of KofTime (stdlib `kof.time`): the
+// calendar primitives are KofTime's (dayOfWeek ISO 1=Mon..7=Sun,
+// daysInMonth, addDays/diffDays on ISO dates, todayIso, now, sleep); this
+// file adds ONLY the wall-clock arithmetic on top, because kof.time
+// recurrence (scheduler.at cron) is UTC-only and has no named-timezone
+// support (docs/gaps-and-reports.md GAP-1 — cron "sem DST").
+//
+// Timezone rule: zoneOffsetHours() reads the REAL rules of a named zone
+// (DST-aware on the JVM; java.time interop verified by compile+run —
+// learn/21). An unknown zone returns null and the caller REFUSES — the
+// Publisher never silently assumes UTC.
+//
+// Contract (locked by tests, see tests/recurrence.kf): a weekly rule "day D
+// at HH:MM in zone Z" fires at the first LOCAL instant strictly after
+// `after` whose wall time in Z is HH:MM and whose local weekday is D.
+
+record Span(String date, Int minutes, Int offset)
+record Weekly(Int weekday, Int hour, Int minute)
+
+Bool isValidDate(Int y, Int m, Int d) {
+    if (y < 1 || y > 9999 || m < 1 || m > 12) {
+        return false
+    }
+    return d >= 1 && d <= time.daysInMonth(y, m)
+}
+
+Bool isValidTime(Int hour, Int minute) {
+    return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59
+}
+
+// Strip Latin-1 accents so "sábado"/"terça" fold to ASCII.
+String asciiFold(String s) {
+    var lower = s.toLowerCase()
+    var out = ""
+    var i = 0
+    while (i < lower.length) {
+        var c = lower.charAt(i)
+        if (c >= 97 && c <= 122 || c >= 48 && c <= 57 || c == 32 || c == 45 || c == 95) {
+            out = out + lower.substring(i, i + 1)
+        } else if (c == 224 || c == 225 || c == 226 || c == 227 || c == 229) {
+            out = out + "a"
+        } else if (c == 231) {
+            out = out + "c"
+        } else if (c == 232 || c == 233 || c == 234) {
+            out = out + "e"
+        } else if (c == 237) {
+            out = out + "i"
+        } else if (c == 242 || c == 243) {
+            out = out + "o"
+        } else if (c == 250) {
+            out = out + "u"
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// "monday", "mon", "segunda", "Sexta-Feira", "2" -> ISO weekday 1..7; -1 unknown.
+Int weekdayFromName(String name) {
+    var n = strings.normalizeWhitespace(asciiFold(name.trim()))
+    if (n == "0" || n == "7") {
+        return 7
+    }
+    if (n == "1") {
+        return 1
+    }
+    if (n == "2") {
+        return 2
+    }
+    if (n == "3") {
+        return 3
+    }
+    if (n == "4") {
+        return 4
+    }
+    if (n == "5") {
+        return 5
+    }
+    if (n == "6") {
+        return 6
+    }
+    var p3 = n.substring(0, math.min(3, n.length))
+    if (p3 == "sun") {
+        return 7
+    }
+    if (p3 == "mon") {
+        return 1
+    }
+    if (p3 == "tue") {
+        return 2
+    }
+    if (p3 == "wed") {
+        return 3
+    }
+    if (p3 == "thu") {
+        return 4
+    }
+    if (p3 == "fri") {
+        return 5
+    }
+    if (p3 == "sat") {
+        return 6
+    }
+    if (p3 == "dom") {
+        return 7
+    }
+    if (p3 == "seg") {
+        return 1
+    }
+    if (p3 == "ter") {
+        return 2
+    }
+    if (p3 == "qua") {
+        return 3
+    }
+    if (p3 == "qui") {
+        return 4
+    }
+    if (p3 == "sex") {
+        return 5
+    }
+    if (p3 == "sab") {
+        return 6
+    }
+    return -1
+}
+
+String weekdayName(Int dow) {
+    if (dow == 1) { return "monday" }
+    if (dow == 2) { return "tuesday" }
+    if (dow == 3) { return "wednesday" }
+    if (dow == 4) { return "thursday" }
+    if (dow == 5) { return "friday" }
+    if (dow == 6) { return "saturday" }
+    return "sunday"
+}
+
+Bool isValidZone(String zone) {
+    if (zone == "" || zone == "UTC") {
+        return true
+    }
+    var parts = zone.split("/")
+    if (parts.length < 2) {
+        return false
+    }
+    for (var p in parts) {
+        if (p.contains(" ") || p.trim() == "") {
+            return false
+        }
+    }
+    return true
+}
+
+// Offset (hours, east positive) of a named zone at a UTC instant (epoch ms).
+// 999999 = zone unknown on this runtime: callers must check `validOffset`,
+// never assume UTC. A primitive sentinel is used because primitive nullable
+// narrowing currently lowers an Integer as a primitive at the call site (a
+// VerifyError repro documented in docs/gaps-and-reports.md BUG-5).
+Long zoneOffsetHours(String zone, Long utcMs) {
+    if (zone == "" || zone == "UTC") {
+        return 0L
+    }
+    try {
+        var rules = ZoneId.of(zone).getRules()
+        var seconds = rules.getOffset(Instant.ofEpochMilli(utcMs)).getTotalSeconds()
+        return (seconds / 3600) as Long
+    } catch (Exception e) {
+        return 999999L
+    }
+}
+
+Bool validOffset(Long offset) {
+    return offset > -999L && offset < 999L
+}
+
+Int toIntStr(String s) {
+    return math.parseInt(s)
+}
+
+String two(Int v) {
+    return strings.padLeft("" + v, 2, "0")
+}
+
+String ymd(Int y, Int m, Int d) {
+    return "" + y + "-" + two(m) + "-" + two(d)
+}
+
+// UTC epoch ms of a UTC civil date + minutes-of-day — integer arithmetic on
+// the KofTime day count (no clock, no drift).
+Long utcMsOf(Int y, Int m, Int d, Int minutes) {
+    var days = time.diffDays("1970-01-01", ymd(y, m, d))
+    return ((days as Long) * 86400000L) + (((minutes as Long) * 60L) * 1000L)
+}
+
+// Local instant -> UTC epoch ms: utc = local - offset.
+Long localToUtc(Span sp) {
+    var parts = sp.date().split("-")
+    return utcMsOf(toIntStr(parts[0]), toIntStr(parts[1]), toIntStr(parts[2]), sp.minutes()) - ((sp.offset() as Long) * 3600000L)
+}
+
+String spanHm(Span s) {
+    return two(s.minutes() / 60) + ":" + two(s.minutes() % 60)
+}
+
+// Timestamp with EXPLICIT offset: 2026-10-05T09:00:00-03:00
+String isoOf(Span s) {
+    var off = s.offset()
+    var sign = "+"
+    if (off < 0) {
+        sign = "-"
+        off = -off
+    }
+    return s.date() + "T" + spanHm(s) + ":00" + sign + two(off) + ":00"
+}
+
+Span? spanFromIso(String iso) {
+    if (iso.length < 25) {
+        return null
+    }
+    var sign = iso.substring(19, 20)
+    var off = toIntStr(iso.substring(20, 22)) * 60 + toIntStr(iso.substring(23, 25))
+    if (sign == "-") {
+        off = -(off / 60)
+    } else {
+        off = off / 60
+    }
+    return Span(iso.substring(0, 10), toIntStr(iso.substring(11, 13)) * 60 + toIntStr(iso.substring(14, 16)), off)
+}
+
+// UTC epoch ms -> local civil instant in a named zone. null if zone unknown.
+Span? localOf(String zone, Long ms) {
+    var off = zoneOffsetHours(zone, ms)
+    if (!validOffset(off)) {
+        return null
+    }
+    var lm = ms + (off * 3600000L)
+    var d = (lm / 86400000L) as Int
+    var tod = lm % 86400000L
+    if (tod < 0) {
+        tod = tod + 86400000L
+        d = d - 1
+    }
+    var parts = time.addDays("1970-01-01", d).split("-")
+    return Span(parts[0] + "-" + parts[1] + "-" + parts[2], (tod / 60000L) as Int, off as Int)
+}
+
+// Parse "HH:MM" -> minutes of day; -1 when malformed.
+Int parseClock(String s) {
+    var parts = s.trim().split(":")
+    if (parts.length != 2 || !strings.isNumeric(parts[0]) || !strings.isNumeric(parts[1])) {
+        return -1
+    }
+    var h = toIntStr(parts[0])
+    var m = toIntStr(parts[1])
+    if (!isValidTime(h, m)) {
+        return -1
+    }
+    return h * 60 + m
+}
+
+// Local instant at hour:minute on civil `date` in the zone; null when
+// invalid/unknown zone.
+Span? candidateOnDate(String date, Int hour, Int minute, String zone) {
+    var parts = date.split("-")
+    var y = toIntStr(parts[0])
+    var m = toIntStr(parts[1])
+    var d = toIntStr(parts[2])
+    if (!isValidDate(y, m, d)) {
+        return null
+    }
+    var off = zoneOffsetHours(zone, utcMsOf(y, m, d, hour * 60 + minute))
+    if (!validOffset(off)) {
+        return null
+    }
+    return Span(date, hour * 60 + minute, off as Int)
+}
+
+// First local instant STRICTLY after `after` matching one weekly rule.
+Span? nextWeekly(Span after, Int weekday, Int hour, Int minute, String zone) {
+    if (!isValidTime(hour, minute) || weekday < 1 || weekday > 7) {
+        return null
+    }
+    var limitMs = localToUtc(after)
+    var date = after.date()
+    var i = 0
+    while (i < 9) {
+        var cand = candidateOnDate(date, hour, minute, zone)
+        if (cand != null) {
+            var parts = date.split("-")
+            var dow = time.dayOfWeek(toIntStr(parts[0]), toIntStr(parts[1]), toIntStr(parts[2]))
+            if (dow == weekday && localToUtc(cand) > limitMs) {
+                return cand
+            }
+        }
+        date = time.addDays(date, 1)
+        i = i + 1
+    }
+    return null
+}
+
+// First match across several weekly rules (e.g. Mon+Wed+Fri at 09:00).
+Span? nextDue(Span after, List<Weekly> rules, String zone) {
+    var bestMs = 999999999999999L
+    var bestIso = ""
+    for (var w in rules) {
+        var n = nextWeekly(after, w.weekday(), w.hour(), w.minute(), zone)
+        if (n != null) {
+            var cand = n
+            var ms = localToUtc(cand)
+            if (ms < bestMs) {
+                bestMs = ms
+                bestIso = isoOf(cand)
+            }
+        }
+    }
+    if (bestIso == "") {
+        return null
+    }
+    var r = spanFromIso(bestIso)
+    return r
+}
+
+// First local instant STRICTLY after `after` for "every N days at HH:MM",
+// anchored on a local date (occurrences = anchor + k*N days).
+Span? nextIntervalDue(Span after, String anchorDate, Int everyDays, Int hour, Int minute, String zone) {
+    if (!isValidTime(hour, minute) || everyDays < 1) {
+        return null
+    }
+    var aParts = anchorDate.split("-")
+    if (aParts.length != 3) {
+        return null
+    }
+    var diff = time.diffDays(anchorDate, after.date())
+    var k = 0
+    if (diff >= 0) {
+        k = (diff / everyDays) * everyDays
+    }
+    var i = 0
+    while (i < 700) {
+        var date = time.addDays(anchorDate, k + i * everyDays)
+        var cand = candidateOnDate(date, hour, minute, zone)
+        if (cand != null && localToUtc(cand) > localToUtc(after)) {
+            return cand
+        }
+        i = i + 1
+    }
+    return null
+}
+
+test "clock parsing is strict" {
+    assert(parseClock("09:30") == 570)
+    assert(parseClock("24:00") == -1)
+    assert(parseClock("9-30") == -1)
+}
+
+test "weekday names accept Portuguese, English and numbers" {
+    assert(weekdayFromName("segunda") == 1)
+    assert(weekdayFromName("Sexta-Feira") == 5)
+    assert(weekdayFromName("sábado") == 6)
+    assert(weekdayFromName("monday") == 1)
+    assert(weekdayFromName("fri") == 5)
+    assert(weekdayFromName("7") == 7)
+    assert(weekdayFromName("invented-day") == -1)
+}
+
+test "named timezone offsets are explicit" {
+    var ms = utcMsOf(2026, 6, 15, 12 * 60)
+    var sp0 = localOf("America/Sao_Paulo", ms)
+    if (sp0 == null) {
+        throw "America/Sao_Paulo unavailable"
+    }
+    var s = sp0
+    assert(s.date() == "2026-06-15")
+    assert(s.minutes() == 9 * 60)
+    assert(s.offset() == -3)
+}
+
+test "weekly recurrence is strictly after and keeps the offset" {
+    var from = Span("2026-03-27", 10 * 60, -3)
+    var next0 = nextWeekly(from, 1, 9, 0, "America/Sao_Paulo")
+    if (next0 == null) {
+        throw "nextWeekly returned null"
+    }
+    var next = next0
+    assert(isoOf(next) == "2026-03-30T09:00:00-03:00")
+}
+
+test "interval recurrence honors its anchor" {
+    var from = Span("2026-03-29", 10 * 60, -3)
+    var next0 = nextIntervalDue(from, "2026-03-28", 3, 9, 0, "America/Sao_Paulo")
+    if (next0 == null) {
+        throw "nextIntervalDue returned null"
+    }
+    var next = next0
+    assert(isoOf(next) == "2026-03-31T09:00:00-03:00")
+}
+
+test "unknown timezone returns null rather than UTC" {
+    var off = zoneOffsetHours("Mars/Olympus_Mons", utcMsOf(2026, 6, 15, 0))
+    assert(!validOffset(off))
+}
