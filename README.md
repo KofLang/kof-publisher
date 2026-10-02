@@ -7,6 +7,9 @@ via `kof.http`+`kof.json`), `kof.orm` sobre SQLite (fila + ledger de
 idempotência) e `kof.process` (git real, clipboard, daemon). Zero stubs:
 quando o LM está fora, a CLI falha com a causa real, nunca finge sucesso.
 
+Licença: **GPLv3** ([LICENSE](LICENSE)) — o pipeline é software livre e
+qualquer uso derivado mantém a licença.
+
 > **Estado em 02/10:** o pipeline completo funciona e o POST real na Posts
 > API do LinkedIn foi validado (HTTP 201 no feed de membro). Publicar *como
 > página* depende da aprovação do Community Management (em review, 10–14
