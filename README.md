@@ -32,7 +32,7 @@ tests/
 ```
 kof build src --target jvm
 
-java -cp build/classes:$HOME/.local/share/kof/lib/kof.jar:sqlite-jdbc.jar Default.Main <cmd>
+java -cp build/classes:$HOME/.local/share/kof/lib/kof.jar:$HOME/.kof/deps/org/xerial/sqlite-jdbc/3.53.4.0/sqlite-jdbc-3.53.4.0.jar Default.Main <cmd>
 
   init         create company.kofmd template (+ state dir)
   check        validate identity + timezone + KofLM availability
@@ -59,13 +59,13 @@ Ollama thinking models need `"think":false` or a big
 (`KOF_LINKEDIN_ACCESS_TOKEN`, `KOF_LINKEDIN_AUTHOR_URN`) — never from the
 company file, never logged (errors pass through `secrets.redact`).
 
-## Tests
+## Tests (20/20 green on the installed kof 0.5.0-beta and the dev jar)
 
 ```
-java -jar kof-cli-0.5.0-beta.jar build src --target jvm
-java -jar kof-cli-0.5.0-beta.jar test src/Recurrence.kf --target jvm   # 6 calendar/timezone tests
-java -jar kof-cli-0.5.0-beta.jar test src/Model.kf --target jvm        # status machine + keys
-java -jar kof-cli-0.5.0-beta.jar test tests --target jvm --timeout 300  # 8 CLI + 2 LM e2e
+kof build src --target jvm
+kof test src/Recurrence.kf --target jvm    # 6 calendar/timezone tests
+kof test src/Model.kf --target jvm         # status machine + keys
+kof test tests --target jvm --timeout 400  # 8 CLI e2e + 3 LM/daemon e2e
 ```
 
 `tests/FakeLm.kf` runs the FULL pipeline (generate -> review -> approve ->
@@ -96,3 +96,11 @@ deterministically (`occurrenceKeyOf`). The daemon CLAIMS the key in the
 retry or a race can never publish the same occurrence twice. A failed
 publish keeps the same publication id and retries it (never regenerates a
 different post).
+
+## Cross-target status (measured 01/10)
+
+| Target | `kof build src` | Notes |
+|--------|-----------------|-------|
+| JVM | ✅ builds, 20/20 tests pass | the supported target (SQLite driver on the classpath) |
+| JS | ✅ compiles clean (`Default.mjs`) | publisher faces (db/http/process) are JVM-validated only |
+| native x86-64 | ❌ compile-time refusal, honest code | `JSN002: LmChatResp has field of type LmMsg not supported by the Native JSON encoder` (nested record in `json.decode<T>`) — flattening the chat response (model/done/content as scalars) unblocks it if a native build is ever needed |
