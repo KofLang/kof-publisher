@@ -1,0 +1,180 @@
+// E2E: the KOF-Lab daily pipeline — real throwaway git repo (real `git`
+// commits), real HTTP fixture LM that quotes the facts it receives, real
+// publisher binary. Covers: facts reach the draft, "sem novidades" skip with
+// the window intact, the em-dash HARD style rejection, and the daemon path
+// advancing the lab marker after a successful autonomous publish.
+
+String envOr(String key, String dflt) {
+    var v = config.env(key)
+    if (v != null && v != "") {
+        return v
+    }
+    return dflt
+}
+
+String publisherDir() {
+    return envOr("KOF_PUBLISHER_DIR", "/home/mel/Documentos/kof-publisher")
+}
+
+String classpath() {
+    var home = envOr("HOME", "/home/mel")
+    var drv = envOr("KOF_SQLITE_JAR", home + "/.kof/deps/org/xerial/sqlite-jdbc/3.53.4.0/sqlite-jdbc-3.53.4.0.jar")
+    return envOr("KOF_PUBLISHER_CLASSES", publisherDir() + "/build/classes")
+        + ":" + home + "/.local/share/kof/lib/kof.jar:" + drv
+}
+
+String workDir(String name) {
+    return "/tmp/kof-pub-tests/" + name
+}
+
+void prepare(String name) {
+    var r = process.run("sh", "-c", "rm -rf '" + workDir(name) + "' && mkdir -p '" + workDir(name) + "'")
+    assert(r.exitCode == 0, "prepare " + name + ": " + r.stderr)
+}
+
+String runCmd(String cmd) {
+    var r = process.run("sh", "-c", cmd + " 2>&1")
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+Int exitOf(String blob) {
+    var i = blob.indexOf("||EXIT=")
+    if (i < 0) {
+        throw "no exit marker"
+    }
+    return blob.substring(i + 7).toInt()
+}
+
+String outOf(String blob) {
+    var i = blob.indexOf("||EXIT=")
+    return blob.substring(0, i)
+}
+
+Bool has(String hay, String needle) {
+    return hay.indexOf(needle) >= 0
+}
+
+String lm11579(String name) {
+    return "KOF_LM_URL=http://127.0.0.1:11579 KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25 "
+}
+
+String base11579(String name) {
+    return "KOF_PUBLISHER_HOME='" + workDir(name) + "/home' KOF_PUBLISHER_DRYRUN_DIR='" + workDir(name) + "/dryrun' "
+}
+
+String cli(String name, String args) {
+    var cmd = "cd '" + workDir(name) + "' && " + base11579(name) + lm11579(name) + "java -cp '" + classpath() + "' Default.Main " + args
+    var r = process.run("sh", "-c", cmd + " 2>&1")
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+// throwaway repo with two commits on branch `lab` + company file pointing at it
+String labSetup(String name) {
+    var repo = workDir(name) + "/repo"
+    var mk = runCmd("mkdir -p '" + repo + "' && cd '" + repo + "' && git init -q && git config user.email t@t && git config user.name t && echo a > a.txt && git add a.txt && git commit -qm 'feat(orm) aceita entity com fields snake case' && git branch -M lab && echo b > b.txt && git add b.txt && git commit -qm 'fix(lexer) corrige estouro na linha de escape'")
+    if (exitOf(mk) != 0) {
+        return mk
+    }
+    var cp = runCmd("cp '" + publisherDir() + "/examples/kof-lab.kofmd' '" + workDir(name) + "/kof-lab.kofmd' && mkdir -p '" + workDir(name) + "/home'")
+    if (exitOf(cp) != 0) {
+        return cp
+    }
+    var sed = runCmd("sed -i 's|^source_repo:.*|source_repo: " + repo + "|' '" + workDir(name) + "/kof-lab.kofmd' && sed -i '/^source_repo:/a source_ref: lab' '" + workDir(name) + "/kof-lab.kofmd' && sed -i 's|^mode: autonomous|mode: assisted|' '" + workDir(name) + "/kof-lab.kofmd'")
+    return sed
+}
+
+test "koflab: generate pulls the lab facts into the draft" {
+    prepare("koflab-facts")
+    var s0 = labSetup("koflab-facts")
+    assert(exitOf(s0) == 0, s0)
+    runCmd("pkill -f fake_lm_kofla[b].py || true; true")
+    var up = runCmd("{ python3 '" + publisherDir() + "/tests/fake_lm_koflab.py' 11579 > '" + workDir("koflab-facts") + "/lm.log' 2>&1 & echo $! > '" + workDir("koflab-facts") + "/lm.pid'; }; sleep 1; curl -s -m 4 http://127.0.0.1:11579/api/tags | grep -c models")
+    assert(exitOf(up) == 0 && outOf(up).trim() == "1", up)
+    var gen = cli("koflab-facts", "generate --company kof-lab.kofmd --store pub.db --topic 'novidades da lab'")
+    assert(exitOf(gen) == 0, gen)
+    assert(has(outOf(gen), "Material da lab"), gen)
+    assert(has(outOf(gen), "feat(orm)"), gen)
+    var list = cli("koflab-facts", "list --status review --company kof-lab.kofmd --store pub.db")
+    assert(exitOf(list) == 0, list)
+    var id = ""
+    for (var line in outOf(list).split("\n")) {
+        var t = line.trim()
+        if (t.startsWith("pub-")) {
+            id = t.split(" ")[0]
+        }
+    }
+    assert(id != "", "no review draft: " + list)
+    var rev = cli("koflab-facts", "review " + id + " --company kof-lab.kofmd --store pub.db")
+    assert(exitOf(rev) == 0, rev)
+    assert(has(outOf(rev), "feat(orm)"), rev)
+    assert(has(outOf(rev), "fix(lexer)"), rev)
+    runCmd("kill $(cat '" + workDir("koflab-facts") + "/lm.pid') 2>/dev/null")
+    assert(exitOf(runCmd("true")) == 0, "kill check")
+}
+
+test "koflab: no news in window keeps the marker and skips honestly" {
+    prepare("koflab-skip")
+    var s0 = labSetup("koflab-skip")
+    assert(exitOf(s0) == 0, s0)
+    runCmd("pkill -f fake_lm_kofla[b].py || true; true")
+    var up = runCmd("{ python3 '" + publisherDir() + "/tests/fake_lm_koflab.py' 11579 > '" + workDir("koflab-skip") + "/lm.log' 2>&1 & echo $! > '" + workDir("koflab-skip") + "/lm.pid'; }; sleep 1; curl -s -m 4 http://127.0.0.1:11579/api/tags | grep -c models")
+    assert(exitOf(up) == 0 && outOf(up).trim() == "1", up)
+    var gen = cli("koflab-skip", "generate --company kof-lab.kofmd --store pub.db --topic 'novidades da lab'")
+    assert(exitOf(gen) == 0, gen)
+    assert(has(outOf(gen), "feat(orm)"), gen)
+    // marker moved to tomorrow -> window empty -> honest skip, no draft, exit 0
+    var future = runCmd("date -d 'tomorrow 12:00' +%Y-%m-%dT%H:%M:00-03:00")
+    assert(exitOf(future) == 0, future)
+    var w = runCmd("mkdir -p '" + workDir("koflab-skip") + "/home' && echo '" + outOf(future).trim() + "' > '" + workDir("koflab-skip") + "/home/lab-last.txt'")
+    assert(exitOf(w) == 0, w)
+    var gen2 = cli("koflab-skip", "generate --company kof-lab.kofmd --store pub.db --topic 'novidades da lab'")
+    assert(exitOf(gen2) == 0, gen2)
+    assert(has(outOf(gen2), "Sem novidades"), gen2)
+    assert(!has(outOf(gen2), "rascunho(s) gerado"), gen2)
+    runCmd("kill $(cat '" + workDir("koflab-skip") + "/lm.pid') 2>/dev/null")
+}
+
+test "koflab: daemon autonomous publish advances the lab window marker" {
+    prepare("koflab-daemon")
+    var repo = workDir("koflab-daemon") + "/repo"
+    var mk = runCmd("mkdir -p '" + repo + "' && cd '" + repo + "' && git init -q && git config user.email t@t && git config user.name t && echo a > a.txt && git add a.txt && git commit -qm 'feat(http) expoe post com headers' && git branch -M lab")
+    assert(exitOf(mk) == 0, mk)
+    var cp = runCmd("cp '" + publisherDir() + "/examples/kof-lab.kofmd' '" + workDir("koflab-daemon") + "/kof-lab.kofmd' && mkdir -p '" + workDir("koflab-daemon") + "/home' && sed -i 's|^source_repo:.*|source_repo: " + repo + "|' '" + workDir("koflab-daemon") + "/kof-lab.kofmd' && sed -i '/^source_repo:/a source_ref: lab' '" + workDir("koflab-daemon") + "/kof-lab.kofmd'")
+    assert(exitOf(cp) == 0, cp)
+    runCmd("pkill -f fake_lm_kofla[b].py || true; true")
+    var up = runCmd("{ python3 '" + publisherDir() + "/tests/fake_lm_koflab.py' 11580 > '" + workDir("koflab-daemon") + "/lm.log' 2>&1 & echo $! > '" + workDir("koflab-daemon") + "/lm.pid'; }; sleep 1; curl -s -m 4 http://127.0.0.1:11580/api/tags | grep -c models")
+    assert(exitOf(up) == 0 && outOf(up).trim() == "1", up)
+    var dEnv = "KOF_PUBLISHER_HOME='" + workDir("koflab-daemon") + "/home' KOF_PUBLISHER_DRYRUN_DIR='" + workDir("koflab-daemon") + "/dryrun' KOF_LM_URL=http://127.0.0.1:11580 KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25 "
+    var ini = runCmd("cd '" + workDir("koflab-daemon") + "' && env " + dEnv + "java -cp '" + classpath() + "' Default.Main init --company kof-lab.kofmd --store pub.db")
+    assert(exitOf(ini) == 0, ini)
+    var at = runCmd("TZ=America/Sao_Paulo date -d '+90 seconds' +%H:%M")
+    assert(exitOf(at) == 0, at)
+    var anchor = runCmd("TZ=America/Sao_Paulo date -d yesterday +%Y-%m-%d")
+    assert(exitOf(anchor) == 0, anchor)
+    var sch = runCmd("cd '" + workDir("koflab-daemon") + "' && env " + dEnv + "java -cp '" + classpath() + "' Default.Main schedule --name koflab --every 1 --anchor " + outOf(anchor).trim() + " --at " + outOf(at).trim() + " --mode autonomous --target dryrun --company kof-lab.kofmd --store pub.db")
+    assert(exitOf(sch) == 0, sch)
+    runCmd("cd '" + workDir("koflab-daemon") + "' && { env " + dEnv + "java -cp '" + classpath() + "' Default.Main daemon --company kof-lab.kofmd --store pub.db > daemon.log 2>&1 & echo $! > daemon.pid; }")
+    var fired = runCmd("for i in $(seq 1 60); do sleep 3; grep -q 'publicada ->' '" + workDir("koflab-daemon") + "/daemon.log' && exit 0; if ! kill -0 $(cat '" + workDir("koflab-daemon") + "/daemon.pid') 2>/dev/null; then exit 1; fi; done; exit 1")
+    assert(exitOf(fired) == 0, "daemon never published: " + runCmd("tail -20 '" + workDir("koflab-daemon") + "/daemon.log'"))
+    var marker = runCmd("cat '" + workDir("koflab-daemon") + "/home/lab-last.txt'")
+    assert(exitOf(marker) == 0 && outOf(marker).trim() != "", "marker not advanced: " + marker)
+    runCmd("touch '" + workDir("koflab-daemon") + "/home/STOP'")
+    var gone = runCmd("for i in $(seq 1 15); do sleep 2; kill -0 $(cat '" + workDir("koflab-daemon") + "/daemon.pid') 2>/dev/null || exit 0; done; exit 1")
+    assert(exitOf(gone) == 0, "daemon ignored STOP")
+    runCmd("kill $(cat '" + workDir("koflab-daemon") + "/lm.pid') 2>/dev/null")
+}
+
+test "koflab: em-dash draft is hard-rejected by the style validator" {
+    prepare("koflab-dash")
+    var s0 = labSetup("koflab-dash")
+    assert(exitOf(s0) == 0, s0)
+    runCmd("pkill -f fake_lm_kofla[b].py || true; true")
+    var up = runCmd("{ python3 '" + publisherDir() + "/tests/fake_lm_koflab.py' 11579 > '" + workDir("koflab-dash") + "/lm.log' 2>&1 & echo $! > '" + workDir("koflab-dash") + "/lm.pid'; }; sleep 1; curl -s -m 4 http://127.0.0.1:11579/api/tags | grep -c models")
+    assert(exitOf(up) == 0 && outOf(up).trim() == "1", up)
+    // topic containing "travessao" makes the fixture answer WITH an em-dash
+    var gen = cli("koflab-dash", "generate --company kof-lab.kofmd --store pub.db --topic 'travessao'")
+    assert(exitOf(gen) == 1, gen)
+    assert(has(outOf(gen), "rejeitado pela validacao"), gen)
+    assert(has(outOf(gen), "travessao"), gen)
+    runCmd("kill $(cat '" + workDir("koflab-dash") + "/lm.pid') 2>/dev/null")
+}

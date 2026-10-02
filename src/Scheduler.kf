@@ -204,7 +204,18 @@ class Scheduler {
             var v = Validation(false, listOf<String>("nothing generated"), listOf<String>())
             var round = 0
             while (round < 3) {
-                var draft = ed.generate(topic, recent, "conteudo recorrente da agenda '" + s.name() + "'")
+                var draft = ""
+                try {
+                    draft = ed.generate(topic, recent, "conteudo recorrente da agenda '" + s.name() + "'")
+                } catch (String e) {
+                    if (e.startsWith("LAB-SKIP")) {
+                        store.updateOccurrence(Occurrence(key, s.name(), occIso, "", "generation", "skipped", e, started, nowStamp()))
+                        observability.increment("publisher.content.skipped", 1)
+                        log.info("ocorrencia " + key + ": " + e + " (janela NAO avanca — amanha tenta de novo)")
+                        return ExecReport(key, "", "skipped", e)
+                    }
+                    throw e
+                }
                 v = ed.validate(draft, recent)
                 if (v.ok()) {
                     content = draft
@@ -240,7 +251,11 @@ class Scheduler {
             log.info("ocorrencia " + key + ": rascunho " + pubId + " em REVIEW aguardando aprovacao humana (assisted)")
             return ExecReport(key, pubId, "review", "awaiting approval")
         }
-        return publishWithRetry(key, s.name(), occIso, pubId, topic, content, started, target)
+        var rep = publishWithRetry(key, s.name(), occIso, pubId, topic, content, started, target)
+        if (rep.result() == "published" && company.sourceRepo() != "") {
+            advanceLabMarker(occIso)
+        }
+        return rep
     }
 
     // Controlled retry: attempt -> backoff -> attempt -> ... -> FAILED.

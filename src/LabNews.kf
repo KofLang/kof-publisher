@@ -1,0 +1,226 @@
+// LabNews — the daily facts of the Kof4j repository.
+//
+// For a company with `source_repo` set, the editorial material is NOT the
+// topic invented from the brief — it is what actually landed in `lab` since
+// the previous post. The facts are gathered with REAL git (read-only, via
+// kof.process argv — never a concatenated shell string) and REAL files:
+//   - feat/fix/docs commits in the window (subjects, EN+PT where present)
+//   - bug entries opened/resolved in docs/bugs-and-gaps/known-bugs.md
+//     (§NNN headings appearing/disappearing between prev and HEAD)
+//   - DECISIONS.md entries added in the window (maintainer votes)
+//   - the current DOING.md claimed units (what the lanes are building NOW)
+// Everything is capped and truncated; the digest goes verbatim into the
+// generation prompt (and into `review`, so a human can audit the input).
+
+record LabFacts(Bool ok, String error, String digest, String window)
+
+// ISO instant (with zone) of the previous daily run, or now-windowDays back.
+// The marker file is updated by daily_run.sh AFTER a successful publish —
+// the marker is what keeps catch-up windows honest after a stopped daemon.
+String labWindowStart(String markerPath, Int windowDays) {
+    var f = File(markerPath)
+    var raw = f.readText()
+    if (raw != null && raw.trim() != "") {
+        var sp0 = spanFromIso(raw.trim())
+        if (sp0 != null) {
+            return raw.trim()
+        }
+    }
+    var nowSp = localOf("America/Sao_Paulo", time.now())
+    if (nowSp == null) {
+        return ""
+    }
+    // go back `windowDays` real days by EPOCH ms and re-project to the zone —
+    // KofTime handles DST/calendar, no hand-rolled civil arithmetic.
+    var past = localOf("America/Sao_Paulo", localToUtc(nowSp) - windowDays * 86400000L)
+    if (past == null) {
+        return ""
+    }
+    return isoOf(past)
+}
+
+List<String> gitSubjects(String repo, String ref, String since) {
+    var r = process.run("git", "-C", repo, "log", ref, "--since=" + since, "--reverse", "--pretty=%s")
+    if (r.exitCode != 0) {
+        return listOf<String>()
+    }
+    return splitNonEmpty(r.stdout)
+}
+
+List<String> splitNonEmpty(String raw) {
+    var out = listOf<String>()
+    for (var line in raw.split("\n")) {
+        var t = line.trim()
+        if (t != "") {
+            out.add(t)
+        }
+    }
+    return out
+}
+
+// commit subjects filtered by prefix convention (feat(...), fix(...), docs(...))
+List<String> filterSubjects(List<String> subs, String prefix) {
+    var out = listOf<String>()
+    for (var s in subs) {
+        if (s.startsWith(prefix)) {
+            out.add(s)
+        }
+    }
+    return out
+}
+
+// §NNN headings in a known-bugs file at a given rev ("git show rev:path").
+List<String> sectionIdsAt(String repo, String rev, String path) {
+    var r = process.run("git", "-C", repo, "show", rev + ":" + path)
+    if (r.exitCode != 0) {
+        return listOf<String>()
+    }
+    return sectionIds(r.stdout)
+}
+
+List<String> sectionIds(String raw) {
+    var out = listOf<String>()
+    for (var line in raw.split("\n")) {
+        var t = line.trim()
+        if (t.startsWith("## §")) {
+            var id = ""
+            var i = 3
+            while (i < t.length) {
+                var c = t.charAt(i)
+                if (c >= 48 && c <= 57) {
+                    id = id + t.substring(i, i + 1)
+                    i = i + 1
+                } else {
+                    if (id != "") {
+                        i = t.length
+                    }
+                }
+            }
+            if (id != "") {
+                out.add("§" + id)
+            }
+        }
+    }
+    return out
+}
+
+Bool has(List<String> xs, String needle) {
+    for (var x in xs) {
+        if (x == needle) {
+            return true
+        }
+    }
+    return false
+}
+
+// §NNN ids that appear at HEAD but not at SINCE (opened in the window).
+List<String> sectionsAdded(List<String> before, List<String> after) {
+    var out = listOf<String>()
+    for (var a in after) {
+        if (!has(before, a)) {
+            out.add(a)
+        }
+    }
+    return out
+}
+
+String firstLineWith(String repo, String rev, String path, String marker) {
+    var r = process.run("git", "-C", repo, "show", rev + ":" + path)
+    if (r.exitCode != 0) {
+        return ""
+    }
+    for (var line in r.stdout.split("\n")) {
+        var t = line.trim()
+        if (t.length >= marker.length && t.indexOf(marker) == 0) {
+            return strings.truncate(t, 220)
+        }
+    }
+    return ""
+}
+
+String labMarkerPath() {
+    return defaultPublisherHome() + "/lab-last.txt"
+}
+
+// The marker advances ONLY after a successful publish — a skipped/failed
+// day keeps the window open so tomorrow's post covers both days.
+String advanceLabMarker(String occIso) {
+    var ok = File(labMarkerPath()).writeText(occIso + "\n")
+    if (!ok) {
+        log.warn("lab: falha ao gravar marker em " + labMarkerPath())
+    }
+    return occIso
+}
+
+LabFacts labFacts(Company company, String markerPath) {
+    var repo = company.sourceRepo()
+    if (repo == "") {
+        return LabFacts(false, "company sem source_repo — sem material de laboratorio", "", "")
+    }
+    var ref = firstNonEmpty(company.sourceRef(), "origin/lab")
+    var head = process.run("git", "-C", repo, "rev-parse", ref)
+    if (head.exitCode != 0) {
+        return LabFacts(false, "git rev-parse falhou em " + repo + ": " + strings.truncate(head.stderr, 200), "", "")
+    }
+    var windowStart = labWindowStart(markerPath, 1)
+    if (windowStart == "") {
+        return LabFacts(false, "timezone America/Sao_Paulo indisponivel para a janela", "", "")
+    }
+    var subs = gitSubjects(repo, ref, windowStart)
+    var feats = filterSubjects(subs, "feat")
+    var fixes = filterSubjects(subs, "fix")
+    var docs = filterSubjects(subs, "docs")
+    var sinceRev = windowStart
+    var knownEn = sectionsAdded(
+        sectionIdsAt(repo, windowStart, "docs/bugs-and-gaps/known-bugs.md"),
+        sectionIdsAt(repo, "HEAD", "docs/bugs-and-gaps/known-bugs.md"))
+    var opened = listOf<String>()
+    for (var id in knownEn) {
+        var line = firstLineWith(repo, "HEAD", "docs/bugs-and-gaps/known-bugs.md", "## " + id)
+        if (line != "") {
+            opened.add(line)
+        }
+    }
+    var decided = firstLineWith(repo, "HEAD", "docs/development/DECISIONS.md", "## ")
+    var claimed = firstLineWith(repo, "HEAD", "DOING.md", "> **")
+    if (subs.size() == 0 && opened.size() == 0) {
+        return LabFacts(true, "", "SEM NOVIDADES NA JANELA", windowStart)
+    }
+    var d = "FATOS DO REPOSITORIO Kof4j (branch lab) desde " + windowStart + "\n"
+    if (feats.size() > 0) {
+        d = d + "FEATURES QUE ENTRARAM (" + feats.size() + "):\n"
+        d = d + joinTruncated(feats, 10, 160) + "\n"
+    }
+    if (fixes.size() > 0) {
+        d = d + "BUGS/CONSISTENCIA CORRETOS (" + fixes.size() + "):\n"
+        d = d + joinTruncated(fixes, 8, 160) + "\n"
+    }
+    if (docs.size() > 0) {
+        d = d + "REGISTROS/DOCS (" + docs.size() + "):\n"
+        d = d + joinTruncated(docs, 8, 140) + "\n"
+    }
+    if (opened.size() > 0) {
+        d = d + "BUGS ABERTOS NO LEDGER NA JANELA:\n"
+        d = d + joinTruncated(opened, 6, 220) + "\n"
+    }
+    if (decided != "") {
+        d = d + "DECISAO DO MAINTAINER MAIS RECENTE: " + decided + "\n"
+    }
+    if (claimed != "") {
+        d = d + "O QUE AS LANES ESTAO CONSTRUINDO AGORA (DOING): " + claimed + "\n"
+    }
+    return LabFacts(true, "", d, windowStart)
+}
+
+String joinTruncated(List<String> items, Int limit, Int width) {
+    var out = ""
+    var i = 0
+    while (i < items.size() && i < limit) {
+        if (out != "") {
+            out = out + "\n"
+        }
+        out = out + "- " + strings.truncate(items.get(i), width)
+        i = i + 1
+    }
+    return out
+}

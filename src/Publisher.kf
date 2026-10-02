@@ -170,6 +170,19 @@ Int cmdGenerate(Store store, Company company, List<String> args) {
     }
     var ed = Editorial(company)
     var sched = Scheduler(store, company)
+    if (company.sourceRepo() != "") {
+        var lf = labFacts(company, labMarkerPath())
+        if (!lf.ok()) {
+            println("lab: " + lf.error())
+            return 1
+        }
+        if (lf.digest() == "SEM NOVIDADES NA JANELA") {
+            println("Sem novidades na lab desde " + lf.window() + " — nada a publicar hoje (janela intacta).")
+            return 0
+        }
+        println("Material da lab (desde " + lf.window() + "):")
+        println(lf.digest())
+    }
     var recent = store.recentPublishedContents(8)
     var targetName = flagValue(args, "--target", firstNonEmpty(company.publishingTarget(), "linkedin"))
     var produced = 0
@@ -232,6 +245,9 @@ Int generateOne(Store store, Scheduler sched, Editorial ed, Company company, Str
             detail = " (" + rep.detail() + ")"
         }
         println("   publish: " + rep.result() + detail)
+        if (rep.result() == "published" && company.sourceRepo() != "") {
+            advanceLabMarker(now)
+        }
     }
     return 1
 }

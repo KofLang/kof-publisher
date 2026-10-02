@@ -36,6 +36,25 @@ String systemRules() {
     return s
 }
 
+// Voice rules for a specific company: base + tone + the author's style
+// guide (`guide:` list in the KofMD). The guide is NOT decoration — validate()
+// hard-rejects the mechanical rules from it (em-dash, CTA cliches).
+String voiceRules(Company company) {
+    var s = systemRules()
+    if (company.tone() != "") {
+        s = s + " TOM OBRIGATORIO: " + company.tone()
+    }
+    var i = 0
+    while (i < company.guide().size() && i < 28) {
+        s = s + "\nREGRA DA AUTORA: " + company.guide().get(i)
+        i = i + 1
+    }
+    if (company.guide().size() > 0) {
+        s = s + "\nRegras mecanicas inegociaveis do validador: NUNCA use travessao (\u2014); nao termine com CTA generico; nao use frases de coach."
+    }
+    return s
+}
+
 // Strip model wrappers (code fences, surrounding quotes) — keep the body.
 String cleanDraft(String raw) {
     var t = raw
@@ -139,6 +158,16 @@ class Editorial {
 
     String generate(String topic, List<String> recent, String objective) {
         var p = contextBrief()
+        if (company.sourceRepo() != "") {
+            var lf = labFacts(company, labMarkerPath())
+            if (!lf.ok()) {
+                throw "lab: " + lf.error()
+            }
+            if (lf.digest() == "SEM NOVIDADES NA JANELA") {
+                throw "LAB-SKIP: sem novidades na lab desde " + lf.window() + " — nada a publicar hoje"
+            }
+            p = p + lf.digest() + "\nUse APENAS esses fatos como materia-prima. NAO invente fatos fora deles.\n\n"
+        }
         p = p + "TEMA DESTA PUBLICACAO: " + topic + "\n"
         if (objective != "") {
             p = p + "OBJETIVO DO CONTEUDO: " + objective + "\n"
@@ -152,7 +181,7 @@ class Editorial {
             }
         }
         p = p + "Escreva a publicacao agora. Responda APENAS com o texto final."
-        var r = lmComplete(systemRules(), p)
+        var r = lmComplete(voiceRules(company), p)
         if (!r.ok()) {
             throw "generate: " + r.error()
         }
@@ -205,6 +234,27 @@ class Editorial {
         if (norm.contains("estamos_vivendo_uma_revolucao")) {
             problems.add("banned opening: 'Estamos vivendo uma revolucao'")
         }
+        // Author style guide — mechanical rules are HARD failures, not advice.
+        if (text.indexOf("—") >= 0) {
+            problems.add("usa travessao — (regra: NUNCA)")
+        }
+        if (norm.contains("comenta_aqui") || norm.contains("e_voce_o_que_acha") || norm.contains("salva_esse_post") || norm.contains("compartilha_com_alguem")) {
+            problems.add("CTA generico de LinkedIn")
+        }
+        if (norm.contains("o_futuro_e_agora") || norm.contains("saia_da_zona_de_conforto") || norm.contains("conhecimento_e_poder") || norm.contains("nao_existe_formula_magica") || norm.contains("seja_a_mudanca") || norm.contains("aprender_nunca_para") || norm.contains("precisamos_abracar")) {
+            problems.add("frase de coach/motivacional generica")
+        }
+        if (norm.contains("voce_ja_parou") || norm.contains("no_mundo_atual") || norm.contains("em_um_cenario")) {
+            problems.add("abertura artificial banida")
+        }
+        var colons = text.split(":").length - 1
+        if (colons > 2) {
+            problems.add("excesso de dois-pontos (" + colons + ") — a autora nao escreve assim")
+        }
+        var nl = text.split("\n\n").length - 1
+        if (nl > 6 && company.guide().size() > 0) {
+            problems.add("paragrafos curtinhos demais (" + nl + " blocos) — texto corrido, poucos paragrafos densos")
+        }
         for (var avoid in company.avoid()) {
             var needle = strings.toSnakeCase(asciiFold(avoid))
             if (needle != "" && norm.contains(needle)) {
@@ -240,7 +290,7 @@ class Editorial {
             p = p + "- " + prob + "\n"
         }
         p = p + "Responda APENAS com o texto final corrigido."
-        var r = lmComplete(systemRules(), p)
+        var r = lmComplete(voiceRules(company), p)
         if (!r.ok()) {
             throw "revise: " + r.error()
         }

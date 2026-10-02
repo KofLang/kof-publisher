@@ -56,6 +56,9 @@ record Company(
     List<String> avoid,
     List<String> goals,
     List<Schedule> schedules,
+    String sourceRepo,
+    String sourceRef,
+    List<String> guide,
     String digest)
 
 String firstNonEmpty(String a, String b) {
@@ -308,6 +311,9 @@ Company loadCompany(String path) {
         globalList(secs, "avoid"),
         globalList(secs, "goals"),
         schedulesOf(secs, tz, mode),
+        firstNonEmpty(sectionField(secs, "publishing", "source_repo"), globalField(secs, "source_repo")),
+        firstNonEmpty(sectionField(secs, "publishing", "source_ref"), globalField(secs, "source_ref")),
+        globalList(secs, "guide"),
         digestText(raw))
 }
 

@@ -123,6 +123,15 @@ for unknown zones; `Context.loadCompany` throws on `timezone: <unknown>`
 ("refusing to assume UTC"); `cli check` shows `RECUSA` for bad schedule
 zones. `tests/Cli.kf` pins this against `Terra/Marte`.
 
+## GAP-5 — `kof.http` verbs return the BODY only, no response headers (OPEN)
+
+`get/post/put/patch/delete/options` return the body `String`; `status` is a
+separate GET-only probe. The Posts API (`/rest/posts`) answers 201 with the
+post id in the `x-restli-id` HEADER (empty body) — so reading a header is
+mandatory unless the client sends `Prefer: return=representation` (which the
+LinkedIn target now does). A header face (`http.postResp -> {status, headers,
+body}`) would remove the trick; recorded as a stdlib gap.
+
 ## Notes (not bugs)
 
 - `config` precedence env `KOF_<KEY>` > `kof.config` — used by tests

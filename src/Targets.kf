@@ -73,7 +73,13 @@ class DryRunTarget implements PublicationTarget {
 }
 
 // ---- LinkedIn (first concrete target) ----
-// POST https://api.linkedin.com/v2/ugcPosts (restli payload).
+// POST https://api.linkedin.com/rest/posts (the Posts API — the UGC Posts
+// endpoint /v2/ugcPosts was deprecated by LinkedIn in 2025). `Prefer:
+// return=representation` is REQUIRED to get the body back: without it the
+// 201 response carries the id ONLY in the x-restli-id response header, and
+// the kof.http verbs expose the body but not response headers
+// (docs/gaps-and-reports.md GAP-5) — the header face would otherwise force
+// JVM interop (java.net.http) for one field.
 class LinkedInTarget implements PublicationTarget {
     String authorUrn
     String apiUrl
@@ -88,8 +94,8 @@ class LinkedInTarget implements PublicationTarget {
     }
 
     String bodyFor(String text) {
-        return "{\"author\":\"" + authorUrn + "\",\"lifecycleState\":\"PUBLISHED\",\"specificContent\":{\"com.linkedin.ugc.ShareContent\":{\"shareCommentary\":{\"text\":\""
-            + strings.escapeJson(text) + "\"},\"shareMediaCategory\":\"NONE\"}},\"visibility\":{\"com.linkedin.ugc.MemberNetworkVisibility\":\"PUBLIC\"}}"
+        return "{\"author\":\"" + authorUrn + "\",\"commentary\":\"" + strings.escapeJson(text)
+            + "\",\"visibility\":\"PUBLIC\",\"distribution\":{\"feedDistribution\":\"MAIN_FEED\",\"targetEntities\":[],\"thirdPartyDistributionChannels\":[]},\"lifecycleState\":\"PUBLISHED\",\"isReshareDisabledByAuthor\":false}"
     }
 
     PublishOutcome publish(String text) {
@@ -98,11 +104,12 @@ class LinkedInTarget implements PublicationTarget {
             throw "linkedin: LINKEDIN_ACCESS_TOKEN missing (env KOF_LINKEDIN_ACCESS_TOKEN) — credentials NEVER go in the company .md"
         }
         http.timeout(30)
-        var h = spawn http.post(apiUrl + "/v2/ugcPosts", bodyFor(text),
+        var h = spawn http.post(apiUrl + "/rest/posts", bodyFor(text),
             "Content-Type: application/json",
             "Authorization: Bearer " + token,
             "X-Restli-Protocol-Version: 2.0.0",
-            "LinkedIn-Version: 202506")
+            "LinkedIn-Version: 202506",
+            "Prefer: return=representation")
         var waited = 0
         var raw = ""
         var died = false
