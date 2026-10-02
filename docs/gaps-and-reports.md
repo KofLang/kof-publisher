@@ -7,11 +7,12 @@ built from the current tree — both tested on OpenJDK 25 (Temurin), Linux.
 
 ## BUG-6 — ORM entity in a named package: class descriptor without package (OPEN, both binaries)
 
-> Upstream: recorded as **§565** in `Kof4j/docs/bugs-and-gaps/known-bugs.md`
-> (BUG-7 → §564, BUG-8 → §563). — prepared commit `609b5e65f` (local tag
-> `docs/known-bugs-563-565`); push BLOCKED 02/10 by the repo-wide
-> pre-receive gate (`analyzed <none>` for all channels — KofLang/Kof4j
-> **issue #726**), unrelated to this doc change.
+> Upstream: **landed on `lab`** as **§566** in
+> `Kof4j/docs/bugs-and-gaps/known-bugs.md` (BUG-7 → §565, BUG-8 → §564) —
+> commit `f041c66b4` (02/10). Earlier attempts were blocked by the repo-wide
+> pre-receive gate (`analyzed <none>` — KofLang/Kof4j **issue #726**); the
+> gate degraded to INCONCLUSIVO and the push went through. Numbers moved
+> §554-556 → §562-564 → §563-565 → §564-566 as upstream consumed ranges.
 
 `entity` declared in `package app`: compiler emits `Class.forName("Erec")`
 (simple name) in `kof_orm_*`, while the class file is `app/Erec.class`.
