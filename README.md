@@ -74,6 +74,40 @@ entrou na branch `lab` do repositório Kof4j**, na voz da autora:
   coach, abertura artificial ("você já parou pra pensar"), abuso de
   dois-pontos e paragrafação picotada. Texto reprovado não passa.
 
+## Como configurar seu próprio app no LinkedIn
+
+Quem clonar este repositório **precisa criar o próprio app no LinkedIn Developers**, pois nenhuma credencial é versionada:
+
+1. Acesse [LinkedIn Developer Portal](https://developer.linkedin.com/) e faça login.
+2. Clique em **Create App**:
+   - Escolha o nome e associe a uma página ou crie um app standalone.
+   - Faça upload de um logo qualquer (obrigatório pelo LinkedIn).
+3. Na aba **Products**:
+   - **Para postar no seu perfil (membro):** Adicione o produto **Share on LinkedIn** e **Sign In with LinkedIn using OpenID Connect**.
+   - **Para postar como Página de Empresa:** Solicite acesso ao **Community Management API** (requer aprovação da equipe do LinkedIn, 10–14 dias úteis).
+4. Na aba **Auth**:
+   - Pegue seu `Client ID` e `Client Secret` (Primary Client Secret).
+   - Na seção **OAuth 2.0 settings** -> **Authorized redirect URLs**, adicione:
+     - `http://localhost:8737/callback` (se for usar o app de perfil/membro)
+     - `http://localhost:8738/callback` (se for usar o app de página/Community Management)
+5. Salve as chaves na sua máquina local (fora do git):
+   ```bash
+   mkdir -p ~/.local/share/kof
+   cat <<EOF > ~/.local/share/kof/linkedin-credentials.properties
+   client_id=SEU_CLIENT_ID
+   client_secret=SEU_CLIENT_SECRET
+   EOF
+   chmod 600 ~/.local/share/kof/linkedin-credentials.properties
+   ```
+6. Faça o OAuth inicial:
+   ```bash
+   # Para postar no perfil pessoal:
+   python3 tools/linked_oauth.py
+   # Ou para postar como página (após aprovação do CM):
+   python3 tools/linked_oauth_page.py 8738
+   ```
+   Abra a URL gerada no navegador, autorize na sua conta, e o script salvará o token e o URN em `~/.local/share/kof/linkedin-secrets.env`.
+
 ## Credenciais (nunca no repositório)
 
 | Arquivo (chmod 600) | Conteúdo |
