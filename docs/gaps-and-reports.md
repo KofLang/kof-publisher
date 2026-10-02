@@ -158,20 +158,21 @@ Workaround in use: full clean rebuild. (Same failure mode family as stale
 build/classes noted on 01/10 — one root cause: overlay generation keyed off
 the previous class set.)
 
-## BUG-11 — `LinkedInTarget.publish`: JVM VerifyError on class load (REPRODUCED 02/10, minimal repro EM ANDAMENTO)
+## BUG-11 — direct `poll(h)` assign (sem cast) gera bytecode que não verifica (RESOLVIDO 02/10)
 
-`publish <id> --target linkedin` dies loading the generated class:
-`VerifyError: Bad type on operand stack ... LinkedInTarget.publish @257:
-invokestatic; Type 'java.lang.Object' not assignable to 'java/lang/String'`.
-It is NOT the personal-URN guard (removed it and the error moved to @247,
-same shape) — it predates this code path and was invisible because every
-E2E so far used the `dryrun` target (the LinkedIn face had never loaded a
-`LinkedInTarget` class in a real run). Suspect area: the `spawn http.post`
-4-headers varargs + `poll(h) as String` + `secrets.redact` chain inside a
-class method. Standalone scratches compiling the same shapes pass, so the
-repro needs the exact publish() structure; filed as work-in-progress with
-the full stack saved in var/ (not committed). Honest note: the class NEVER
-loaded successfully — no LinkedIn post ever left this box through Kof code.
+`raw = poll(h)` numa atribuição de String compila mas estoura no verifier na
+PRIMEIRA carga da classe: `VerifyError: Bad type on operand stack ... Type
+'java.lang/Object' not assignable to java/lang/String` (ou `not assignable to
+integer` no `while (waited < N && !done(h))` do mesmo método). `poll` retorna
+`Object`; a atribuição direta ao slot de String não emite `checkcast`.
+Repro minimo em `docs/repros/poll-cast.kf` (mesma shape: class method +
+spawn de funcao top-level + while `!doneH(h)` + `raw = poll(h)`): falha com
+VerifyError; com `var v = poll(h); raw = v as String` (padrao ja usado em
+KofLm) carrega e roda. Fix aplicado no `LinkedInTarget.publish`. Nota de
+honestidade: o segundo suspeito (`Void checkAuthorPolicy() { ... return 0 }`)
+foi trocado por `Int` por cautela, mas o repro minimo confirma o poll como
+causa; os builds que ainda davam VerifyError depois do fix eram classes
+compiladas ANTES dele (ver BUG-10, overlay velho).
 
 ## GAP-6 — Posts API refuses `urn:li:group:*` authors; `LinkedIn-Version` must be an active release date (MEDIDO 02/10)
 

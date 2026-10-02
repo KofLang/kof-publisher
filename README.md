@@ -132,7 +132,7 @@ duplicar um post que ja subiu ao vivo.
 
 | Coisa | Estado |
 |---|---|
-| Post real como membro | ✅ HTTP 201 validado ao vivo (via request direto; alvo `linkedin` do Kof tem o VerifyError BUG-11 aberto — a face nunca carregou numa E2E ate hoje) |
+| Post real como membro | ✅ HTTP 201 validado ao vivo (via request direto; VerifyError da face `linkedin` resolvido (BUG-11: `poll(h)` sem cast); falta so o token CM pra postar de verdade pela Kof code) |
 | Post como página | ⏳ aguardando CM (author `urn:li:organization` precisa escopo `w_organization_social`) |
 | Post em grupo | ❌ sem API: `Allowed URN types are organization, person` (422 medido) |
 | Versão da Posts API | header `LinkedIn-Version: 202609` ativo; 202506/202610 → 426 (medido) |
@@ -140,6 +140,7 @@ duplicar um post que ja subiu ao vivo.
 | JS | compila limpo; faces do publisher validadas só em JVM |
 | `kof.secrets` | doc promete `KOF_`+config; JVM faz `getenv` puro (BUG-9) |
 | build incremental | não regenera decoders de records novos (BUG-10) → sempre `rm -rf build/classes` |
+| `poll(h)` sem cast | VerifyError na carga da classe (BUG-11, resolvido no publisher; repro em `docs/repros/poll-cast.kf`) |
 
 ## Estrutura
 

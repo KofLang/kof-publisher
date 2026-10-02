@@ -136,7 +136,7 @@ class LinkedInTarget implements PublicationTarget {
     // spray the author's personal profile. (Separated from publish() because
     // an inline early-throw before the spawn/poll loop tripped a JVM
     // VerifyError in 0.5.0-beta codegen — docs/gaps-and-reports.md BUG-11.)
-    Void checkAuthorPolicy() {
+    Int checkAuthorPolicy() {
         var isPerson = false
         if (authorUrn.startsWith("urn:li:person")) {
             isPerson = true
@@ -177,7 +177,8 @@ class LinkedInTarget implements PublicationTarget {
         }
         if (done(h)) {
             try {
-                raw = poll(h)
+                var v = poll(h)
+                raw = v as String
             } catch (String e) {
                 died = true
                 raw = e

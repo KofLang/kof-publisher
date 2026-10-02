@@ -1,0 +1,27 @@
+class W {
+    String go() {
+        var h = spawn httpGetSafe("http://127.0.0.1:1/x")
+        var raw = ""
+        var waited = 0
+        while (waited < 100 && !h.done()) {
+            time.sleep(20)
+            waited = waited + 20
+        }
+        if (h.done()) {
+            raw = poll(h)
+        }
+        return raw
+    }
+    String httpGetSafe(String u) {
+        try {
+            return http.get(u)
+        } catch (Exception e) {
+            return e.toString()
+        }
+    }
+}
+test "poll direct assign compiles" {
+    var w = W()
+    var r = w.go()
+    assert(r.indexOf("Exception") >= 0 || r == "", "ok")
+}
