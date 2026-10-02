@@ -1,0 +1,27 @@
+# kof-publisher — exemplo de configuracao POR USUARIO.
+# Coloque no kof.config padrao (kof.config no diretorio de execucao) ou
+# aponte o seu: export KOF_CONFIG=/caminho/para/kof.config
+# Precedencia real (learn/32): KOF_CONFIG > env KOF_<CHAVE> > profile > kof.config > default.
+# Segredo no arquivo: deixe chmod 600 (ou use env/secret-store e apague daqui).
+
+# ---- linguagem (LM) ----
+# openai-compatible (auto-detectado pelo /v1 na URL):
+lm.url=https://infer.flatt.com.br/v1
+lm.model=qwen3.8-27b
+lm.api.key=COLE_AQUI_OUA_API_KEY
+# ou Ollama local: lm.url=http://localhost:11434  lm.model=qwen3.5:0.8b
+# lm.tokens=700        # budget de saida
+# lm.timeout=240       # segundos por chamada
+# lm.think=true        # reativa reasoning_effort/thinking
+
+# ---- LinkedIn (so via este arquivo ou env; NUNCA no .kofmd da empresa) ----
+linkedin.access.token= Cole o token do linked_oauth.py
+linkedin.author.urn=urn:li:organization:ID_DA_PAGINA
+# posting no PROPRIO perfil (membro) — exige escolha conscientemente:
+# linkedin.allow.personal=true
+# linkedin.api=https://api.linkedin.com
+
+# ---- publisher ----
+# publisher.home=~/.local/share/kof-publisher
+# publisher.store=~/.local/share/kof-publisher/koflab.db
+# publisher.dryrun.dir=~/.local/share/kof-publisher/dryrun

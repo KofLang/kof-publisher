@@ -1,0 +1,10 @@
+[Unit]
+Description=KOF publisher diario 09:30
+
+[Timer]
+OnCalendar=*-*-* 09:30:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

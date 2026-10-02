@@ -17,7 +17,10 @@ positioning: Kof e construido em aberto, com lane de recurso, portao de teste, l
 timezone: America/Sao_Paulo
 mode: autonomous
 target: linkedin
-source_repo: /home/mel/Documentos/Kof4j
+source_repo: $KOF_KOF4J_REPO
+# source_repo: /caminho/absoluto/para/o/checkout/Kof4j  (ou o env acima)
+# publish.* ficam em kof.config ou env KOF_* por USUARIO — nada aqui:
+#   linkedin.author.urn, linkedin.access.token, lm.url, lm.model, lm.api.key
 
 # voice
 

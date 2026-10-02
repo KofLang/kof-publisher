@@ -144,7 +144,7 @@ class LinkedInTarget implements PublicationTarget {
         if (isPerson) {
             var allow = pSecret("linkedin.allow.personal", "KOF_LINKEDIN_ALLOW_PERSONAL")
             if (allow != "true") {
-                throw "linkedin: URN e de PERFIL PESSOAL e o publisher so posta como pagina — use o token CM (urn:li:organization) ou defina KOF_LINKEDIN_ALLOW_PERSONAL=true conscientemente"
+                throw "linkedin: URN e de PERFIL PESSOAL e o publisher so posta como pagina — use o token CM (urn:li:organization) ou defina linkedin.allow.personal=true (kof.config) ou KOF_LINKEDIN_ALLOW_PERSONAL=true conscientemente"
             }
         }
         return 0

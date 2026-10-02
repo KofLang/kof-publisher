@@ -1,0 +1,11 @@
+[Unit]
+Description=KOF publisher - post diario das novidades da lab
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Ajuste os caminhos para o checkout de quem usa (%h = home do usuario)
+WorkingDirectory=%h/Documentos/kof-publisher
+ExecStart=%h/Documentos/kof-publisher/tools/koflab-daily.sh
+# Opcional (se nao usar kof.config):
+# EnvironmentFile=%h/.config/kof-publisher/env

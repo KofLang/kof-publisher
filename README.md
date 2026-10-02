@@ -14,27 +14,38 @@ quando o LM está fora, a CLI falha com a causa real, nunca finge sucesso.
 > Enquanto o CM não sai, o fluxo diário usa o alvo `clipboard` (texto pronto
 > pra colar na UI). Limitações e bugs abertos: [docs/gaps-and-reports.md](docs/gaps-and-reports.md).
 
+## Configuração por usuário (multi-tenant, zero hardcode)
+
+Toda configuração sensível ou de caminho vive em **`kof.config`** ou em
+**env `KOF_<CHAVE>`** — precedência `KOF_CONFIG` > env > profile >
+`kof.config` > default do código. Copie `tools/kof.config.example` e edite;
+ou exporte os `KOF_*`. Nada de editar código para trocar usuário, LM,
+destino ou repositório. Chaves principais:
+
+| chave (kof.config) | env equivalente | o que faz |
+|---|---|---|
+| `lm.url` `lm.model` `lm.api.key` | `KOF_LM_*` | LM (auto-detecta OpenAI-compatível quando a URL tem `/v1`; senão Ollama) |
+| `linkedin.author.urn` | `KOF_LINKEDIN_AUTHOR_URN` | `urn:li:organization:<id>` = **página** (requer CM aprovado) · `urn:li:person:<sub>` = **perfil**. GRUPO NAO EXISTE como author na Posts API (422 medido: "Allowed URN types are organization, person") |
+| `linkedin.access.token` | `KOF_LINKEDIN_ACCESS_TOKEN` | token OAuth do app correspondente |
+| `linkedin.allow.personal` | `KOF_LINKEDIN_ALLOW_PERSONAL` | `true` só quando o operador quer conscientemente postar no próprio perfil |
+| `publisher.home/store/dryrun.dir` | `KOF_PUBLISHER_*` | onde vivem fila/ledger (default `$XDG_DATA_HOME/kof-publisher`) |
+| (source_repo no .kofmd) | `KOF_KOF4J_REPO` | `source_repo: $KOF_KOF4J_REPO` — o loader expande `$VAR` no KofMD |
+
+O destino é escolhido por configuração, **o mesmo código serve os dois
+modos automáticos**: página (token/URN do Community Management) e perfil
+(`allow.personal=true` como opt-in explícito). Sem caminhos hardcoded, sem
+estado no repositório, sem etapa manual no meio.
+
 ## TL;DR — rodando hoje
 
 ```bash
-# 1. compilar (kof 0.5.0-beta; SEMPRE rebuild limpo apos mudar records — BUG-10)
-cd /home/mel/Documentos/kof-publisher
-rm -rf build/classes && kof build src --target jvm
+cd /home/mel/Documentos/kof-publisher          # (ou o seu checkout)
+rm -rf build/classes && kof build src --target jvm   # kof 0.5.0-beta
+cp tools/kof.config.example ~/.config/kof/kof.config # edite: LM + URN + token
+export KOF_KOF4J_REPO=/caminho/para/Kof4j             # ou edite source_repo no .kofmd
 
-# 2. definir o runbook alias CP para nao repetir o classpath
-CP="build/classes:$HOME/.local/share/kof/lib/kof.jar:$HOME/.kof/deps/org/xerial/sqlite-jdbc/3.53.4.0/sqlite-jdbc-3.53.4.0.jar"
-alias kpub="java -cp $CP Default.Main"
-
-# 3. gerar o post do dia a partir dos FATOS da lab do Kof4j
-source ~/.local/share/kof/kof-lm.env          # LM (beta-llm ou Ollama)
-kpub generate --company examples/kof-lab.kofmd --store var/koflab.db \
-              --topic "novidades da lab"
-
-# 4. ver, aprovar, publicar
-kpub list --company examples/kof-lab.kofmd --store var/koflab.db
-kpub review <id> ...                           # mostra texto + validação
-kpub approve <id> ...
-kpub publish <id> --target clipboard ...       # interim: cola no grupo/página pela UI
+# ciclo completo, automatico:
+tools/koflab-daily.sh   # fatos da lab -> LM -> validacao de estilo -> POST real
 ```
 
 ## Os dois modos
