@@ -1,135 +1,157 @@
 # kof-publisher
 
-Editorial pipeline + recurring publisher for a company's LinkedIn voice,
-written 100% in Kof on top of the real Kof4j surface: KofMD (identity),
-KofTime (recurrence with explicit IANA timezone), KofLM (Ollama/OpenAI-style
-chat), `kof.orm` over SQLite (state + idempotency ledger) and `kof.process`
-(daemon). No stubs: when KofLM is offline the CLI fails with its real cause.
+Editor e publicador recorrente do LinkedIn do **Kof**, escrito 100% em Kof
+sobre a superfície real do Kof4j: KofMD (identidade editorial), KofTime
+(recorrência com timezone IANA explícito), KofLM (chat Ollama/OpenAI-style
+via `kof.http`+`kof.json`), `kof.orm` sobre SQLite (fila + ledger de
+idempotência) e `kof.process` (git real, clipboard, daemon). Zero stubs:
+quando o LM está fora, a CLI falha com a causa real, nunca finge sucesso.
 
-Measured environment: kof 0.5.0-beta, OpenJDK 25 LTS (Temurin). Compiler gaps
-found while building this (with repros): [docs/gaps-and-reports.md](docs/gaps-and-reports.md).
+> **Estado em 02/10:** o pipeline completo funciona e o POST real na Posts
+> API do LinkedIn foi validado (HTTP 201 no feed de membro). Publicar *como
+> página* depende da aprovação do Community Management (em review, 10–14
+> dias úteis). Grupos **não** têm API (o LinkedIn recusa `urn:li:group`).
+> Enquanto o CM não sai, o fluxo diário usa o alvo `clipboard` (texto pronto
+> pra colar na UI). Limitações e bugs abertos: [docs/gaps-and-reports.md](docs/gaps-and-reports.md).
 
-## Layout
+## TL;DR — rodando hoje
 
-```
-src/            root package (see the ORM entity gap below)
-  Main.kf         entry point
-  Context.kf      company.kofmd loader (KofMD)
-  Recurrence.kf   timezone-safe weekly/interval calendar
-  KofLm.kf        KofLM face over kof.http + kof.json (Ollama /api/chat)
-  Editorial.kf    generate / validate / revise / dedup
-  Store.kf        entities (Publication, Schedule, Occurrence) + kof.orm
-  Scheduler.kf    agenda, next occurrence, claim/idempotency, retry
-  Targets.kf      PublicationTarget: dryrun + LinkedIn (ugcPosts)
-  Publisher.kf    CLI dispatch
-  kofmd/          vendored KofMD parser + schemas (schema-gated sections)
-tests/
-  Cli.kf          end-to-end: spawns the REAL built binary
-```
+```bash
+# 1. compilar (kof 0.5.0-beta; SEMPRE rebuild limpo apos mudar records — BUG-10)
+cd /home/mel/Documentos/kof-publisher
+rm -rf build/classes && kof build src --target jvm
 
-## Commands
+# 2. definir o runbook alias CP para nao repetir o classpath
+CP="build/classes:$HOME/.local/share/kof/lib/kof.jar:$HOME/.kof/deps/org/xerial/sqlite-jdbc/3.53.4.0/sqlite-jdbc-3.53.4.0.jar"
+alias kpub="java -cp $CP Default.Main"
 
-```
-kof build src --target jvm
+# 3. gerar o post do dia a partir dos FATOS da lab do Kof4j
+source ~/.local/share/kof/kof-lm.env          # LM (beta-llm ou Ollama)
+kpub generate --company examples/kof-lab.kofmd --store var/koflab.db \
+              --topic "novidades da lab"
 
-java -cp build/classes:$HOME/.local/share/kof/lib/kof.jar:$HOME/.kof/deps/org/xerial/sqlite-jdbc/3.53.4.0/sqlite-jdbc-3.53.4.0.jar Default.Main <cmd>
-
-  init         create company.kofmd template (+ state dir)
-  check        validate identity + timezone + KofLM availability
-  generate     drafts via KofLM (--topic, --ideas N, --publish-ok)
-  list         queue (--status review|approved|...)
-  review       show draft + deterministic validation
-  approve|reject|cancel <id>
-  publish      publish an approved/scheduled publication
-  schedule     register an agenda (--name --days mon,wed --at 09:00 [--every N --anchor D])
-  schedules    persisted agendas + next occurrence
-  sync         load the `# schedule <name>` blocks from company.kofmd
-  daemon       run the agenda (STOP file: <store>.stop)
-  history      occurrence ledger (never runs an occurrence twice)
+# 4. ver, aprovar, publicar
+kpub list --company examples/kof-lab.kofmd --store var/koflab.db
+kpub review <id> ...                           # mostra texto + validação
+kpub approve <id> ...
+kpub publish <id> --target clipboard ...       # interim: cola no grupo/página pela UI
 ```
 
-Global flags: `--company <file>` (default `company.kofmd`), `--store <db>`.
+## Os dois modos
 
-Config (env `KOF_<KEY>` beats `kof.config`): `lm.url` (default
-`http://localhost:11434`), `lm.model` (default `qwen3.5:0.8b` — models with a
-Ollama thinking models need `"think":false` or a big
-`lm.tokens` — `lm.think=true` re-enables thinking), `lm.tokens`,
-`lm.timeout`, `publisher.home`, `publisher.store`, `publisher.dryrun.dir`,
-`linkedin.api`. LinkedIn credentials come ONLY from secrets
-(`KOF_LINKEDIN_ACCESS_TOKEN`, `KOF_LINKEDIN_AUTHOR_URN`) — never from the
-company file, never logged (errors pass through `secrets.redact`).
+### Modo empresa genérica (`init`)
+`kpub init --company company.kofmd` cria o template KofMD (nome, tom,
+tópics, agenda) e o pipeline editorial padrão (generate → review → approve →
+publish), com aprovação humana (`assisted`) por default.
 
-## Tests (24/24 green on the installed kof 0.5.0-beta and the dev jar)
+### Modo KOF Lab (`examples/kof-lab.kofmd`) — diário, automático
+Todo dia às 09:30 (America/Sao_Paulo) o publisher posta **o que realmente
+entrou na branch `lab` do repositório Kof4j**, na voz da autora:
+
+- **Fatos, não vibes** (`src/LabNews.kf`): `git log` da janela (commits
+  `feat/fix/docs`), bugs `§NNN` abertos no ledger, a última decisão `## D-`
+  do DECISIONS.md, o que as lanes claimam no DOING.md. Janela = desde a
+  última publicação BEM-SUCEDIDA (arquivo `lab-last.txt` no `publisher.home`).
+  Dia sem novidade ⇒ "sem novidades", **nada é publicado** e a janela do
+  dia seguinte cobre os dois dias. O post nunca inventa fato.
+- **Estilo é lei, não sugestão**: os 24 pontos do guia da autora vivem no
+  `guide:` do KofMD e viram as system rules do LM; o validador determinístico
+  **bloqueia** travessão, CTA genérico ("comenta aqui embaixo"), frase de
+  coach, abertura artificial ("você já parou pra pensar"), abuso de
+  dois-pontos e paragrafação picotada. Texto reprovado não passa.
+
+## Credenciais (nunca no repositório)
+
+| Arquivo (chmod 600) | Conteúdo |
+|---|---|
+| `~/.local/share/kof/linkedin-credentials.properties` | `client_id`/`client_secret` do app de membro |
+| `~/.local/share/kof/linkedin-page-credentials.properties` | idem, app do Community Management |
+| `~/.local/share/kof/linkedin-secrets.env` | `KOF_LINKEDIN_ACCESS_TOKEN` + `KOF_LINKEDIN_AUTHOR_URN` (refazer a cada ~60 dias) |
+| `~/.local/share/kof/kof-lm.env` | `KOF_LM_URL/MODEL/API_KEY` do beta-llm (ou aponte pro Ollama local) |
+
+Regras: segredo só via env/config (`pSecret`: `config.str` honrando `KOF_*`,
+fallback `secrets.get` — a doc do `kof.secrets` mente sobre o prefixo, BUG-9);
+nenhum token vai pra log (erros passam por `secrets.redact`); se um segredo
+apareceu num chat, gire no portal.
+
+### OAuth (uma vez por ~60 dias)
+```bash
+python3 tools/linked_oauth.py        # app membro: redirect http://localhost:8737/callback
+python3 tools/linked_oauth_page.py 8738   # app pagina: redirect ...:8738, escopo w_organization_social
+```
+O script abre um listener local, você autoriza no Firefox logada, e ele grava
+token (+ URN) no arquivo 600 correspondente. O token da página exige o CM
+aprovado; sem ele, qualquer URN de organização volta 403. **Guarda de
+segurança:** o `LinkedInTarget` recusa URN de perfil pessoal a menos de
+`KOF_LINKEDIN_ALLOW_PERSONAL=true` conscientemente — um cron mal configurado
+nunca posta na sua conta sem você querer.
+
+## Comandos da CLI
 
 ```
-kof build src --target jvm
-kof test src/Recurrence.kf --target jvm    # 6 calendar/timezone tests
-kof test src/Model.kf --target jvm         # status machine + keys
-kof test tests --target jvm --timeout 400  # 8 CLI e2e + 3 LM/daemon e2e
+init | check | generate (--topic, --ideas N, --publish-ok, --target)
+list (--status) | review <id> | approve <id> | reject <id> <motivo> | cancel <id>
+publish <id> [--target dryrun|clipboard|linkedin]
+schedule (--name --days mon,wed --at 09:00 | --every N --anchor DATA) 
+schedules | sync (importa blocos `# schedule <nome>` do KofMD)
+daemon (agenda viva; STOP file em <publisher.home>/STOP) | history
+```
+Flags globais: `--company <file>` `--store <db>`. Config (`KOF_<KEY>` >
+`kof.config`): `lm.url|model|tokens|timeout|think|style|temp`,
+`publisher.home|store|dryrun.dir`, `linkedin.api|access.token|author.urn|allow.personal`.
+LM: estilo `openai` autodetectado quando a URL contém `/v1` (beta-llm;
+`reasoning_effort=none` senão o thinking come o budget), Ollama caso
+contrário (`"think":false` por default pelo mesmo motivo).
+
+## Testes — 24/24 verdes (kof instalado 0.5.0-beta e dev-jar)
+
+```bash
+rm -rf build/classes && kof build src --target jvm
+kof test src/Recurrence.kf --target jvm                  # 6  calendario/timezone
+kof test src/Model.kf --target jvm                       # 3  maquina de estados
+kof test tests/Cli.kf --target jvm --timeout 140         # 8  e2e CLI (binario real)
+kof test tests/FakeLm.kf --target jvm --timeout 220      # 3  pipeline+LM fake+daemon
+kof test tests/KofLab.kf --target jvm --timeout 260      # 4  fatos da lab+skip+estilo+marker
+```
+Os E2E sobem fixture HTTP Ollama-compatible (só o *modelo* é determinístico;
+http/json/orm/targets/daemon são reais). `KOF_LM_LIVE=<modelo>` roda o mesmo
+fluxo contra o LM de verdade. Paths: `KOF_PUBLISHER_DIR|CLASSES`,
+`KOF_SQLITE_JAR`.
+
+## Idempotência (aceitação §12/§13)
+
+Uma ocorrência = `(agenda, instante)`, chave determinística reivindicada no
+ledger `Occurrence` **antes** de gerar. Restart, segundo daemon, retry ou
+race nunca publicam a mesma coisa duas vezes. Publish que falhou reusa o
+MESMO rascunho (nunca regenera texto diferente pro mesmo slot). Um `201` da
+Posts API com corpo vazio conta como sucesso (o id so existe no header
+`x-restli-id`, que o `kof.http` nao le — GAP-5) justamente pra o retry nao
+duplicar um post que ja subiu ao vivo.
+
+## Limites honestos (medidos, com repro em docs/)
+
+| Coisa | Estado |
+|---|---|
+| Post real como membro | ✅ HTTP 201 validado ao vivo (via request direto; alvo `linkedin` do Kof tem o VerifyError BUG-11 aberto — a face nunca carregou numa E2E ate hoje) |
+| Post como página | ⏳ aguardando CM (author `urn:li:organization` precisa escopo `w_organization_social`) |
+| Post em grupo | ❌ sem API: `Allowed URN types are organization, person` (422 medido) |
+| Versão da Posts API | header `LinkedIn-Version: 202609` ativo; 202506/202610 → 426 (medido) |
+| native x86-64 | ❌ recusa honesta `JSN002` (record aninhado no encoder nativo) |
+| JS | compila limpo; faces do publisher validadas só em JVM |
+| `kof.secrets` | doc promete `KOF_`+config; JVM faz `getenv` puro (BUG-9) |
+| build incremental | não regenera decoders de records novos (BUG-10) → sempre `rm -rf build/classes` |
+
+## Estrutura
+
+```
+src/    Main Publisher Context Recurrence LabNews Editorial KofLm Store Scheduler Targets Model kofmd/
+tests/  Cli FakeLm KofLab fake_lm_server.py fake_lm_koflab.py
+tools/  linked_oauth.py linked_oauth_page.py koflab-daily.sh
+docs/   gaps-and-reports.md repros/          # bugs reais medidos, com minimo reproduzivel
+var/    koflab.db koflab-daily.log           # runtime, nunca versionado
 ```
 
-`tests/FakeLm.kf` runs the FULL pipeline (generate -> review -> approve ->
-publish -> history -> dry-run file) against `tests/fake_lm_server.py`, a
-fixture that serves the real Ollama chat protocol over a socket — only the
-model is deterministic; kof.http, json, ORM and the targets are all live.
-Set `KOF_LM_LIVE=<model>` to additionally drive the flow through the local
-Ollama (qwen3.5:0.8b measured ~1.5 s/token on CPU — budget `lm.timeout`
-accordingly).
-
-`tests/FakeLm.kf` also drives the DAEMON: a weekly agenda due ~90s ahead
-must fire autonomously (autonomous+dryrun), a `STOP` file must end it
-cleanly, and a restarted daemon must not publish the same occurrence twice
-(ledger `loop@<iso>` claim). `recoverAgenda` keeps a stored next occurrence
-that is in the future or overdue by <=10 min — a restart catches up, it
-never skips a due slot.
-
-`tests/Cli.kf` assumes the KofLM is OFFLINE for the outage test by injecting
-`KOF_LM_URL=http://127.0.0.1:1`; it asserts the error is reported as data
-(exit code + message), with no stacktrace. Override paths with
-`KOF_PUBLISHER_DIR` / `KOF_PUBLISHER_CLASSES` / `KOF_SQLITE_JAR`.
-
-## KOF Lab daily mode (examples/kof-lab.kofmd)
-
-Publishes, every day at 09:30 America/Sao_Paulo, what actually landed in
-`lab` in the Kof4j repository — in the author's real voice (Mel Santos:
-continuous prose, few dense paragraphs, zero em-dashes, zero coach
-cliches, technically precise, humor from real experience). The company
-file carries the full 24-rule style guide as a `guide:` list; `src/LabNews.kf`
-gathers the day's facts with real git (commits `feat/fix/docs` in the
-window, §NNN bugs opened in the ledger, the newest DECISIONS.md vote, the
-DOING.md claimed units).
-
-- **Facts, not vibes:** the generation prompt is the digest; a window with
-  no news ends with "sem novidades" and publishes NOTHING (the marker file
-  under `publisher.home` only advances after a successful publish, so a
-  skipped day widens tomorrow's window instead of faking content).
-- **Style is enforced, not suggested:** the validator hard-rejects em-dashes,
-  generic CTAs, coach sentences, artificial openings and colon/paragraph
-  abuse whenever a guide is configured (tested end to end in
-  `tests/KofLab.kf`).
-- **Once per ~60 days:** `python3 tools/linked_oauth.py` — add
-  `http://localhost:8737/callback` as the Redirect URL in the LinkedIn app
-  first; open the printed link in Firefox, authorize; the script exchanges
-  the code, resolves the person URN via OIDC and writes
-  `~/.local/share/kof/linkedin-secrets.env` (chmod 600). Tokens are never
-  printed and never touch the repo.
-- **Daily:** `tools/koflab-daily.sh` (fetch origin/lab, generate, validate,
-  publish to the Posts API). Crontab:
-  `30 9 * * * /home/mel/Documentos/kof-publisher/tools/koflab-daily.sh >> /home/mel/Documentos/kof-publisher/var/koflab-daily.log 2>&1`
-
-## Idempotency model
-
-One occurrence = `(schedule name, scheduled-at instant)`, keyed
-deterministically (`occurrenceKeyOf`). The daemon CLAIMS the key in the
-`Occurrence` ledger BEFORE generating, so a restart, a second daemon, a
-retry or a race can never publish the same occurrence twice. A failed
-publish keeps the same publication id and retries it (never regenerates a
-different post).
-
-## Cross-target status (measured 01/10)
-
-| Target | `kof build src` | Notes |
-|--------|-----------------|-------|
-| JVM | ✅ builds, 20/20 tests pass | the supported target (SQLite driver on the classpath) |
-| JS | ✅ compiles clean (`Default.mjs`) | publisher faces (db/http/process) are JVM-validated only |
-| native x86-64 | ❌ compile-time refusal, honest code | `JSN002: LmChatResp has field of type LmMsg not supported by the Native JSON encoder` (nested record in `json.decode<T>`) — flattening the chat response (model/done/content as scalars) unblocks it if a native build is ever needed |
+### Diário com o CM aprovado (destino final)
+`tools/koflab-daily.sh` já está pronto: fetch `origin/lab` → generate (fatos
+reais) → valida → `publish --target linkedin` com token/URN da página. Para
+ligar de vez: `30 9 * * * /home/mel/Documentos/kof-publisher/tools/koflab-daily.sh >> .../var/koflab-daily.log 2>&1`.
