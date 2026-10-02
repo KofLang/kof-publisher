@@ -18,6 +18,28 @@ record LmMsg(String role, String content)
 record LmChatResp(String model, LmMsg message, Bool done)
 record LmResult(String text, Bool ok, String error, Int ms)
 
+// OpenAI-compatible chat protocol (/v1/chat/completions) — the same surface,
+// a different envelope. Detected from the URL (contains "/v1") or forced
+// with lm.style=openai|ollama.
+record OaiMsg(String content)
+record OaiChoice(Int index, OaiMsg message)
+record OaiResp(String id, List<OaiChoice> choices)
+
+String lmStyle() {
+    var s = config.str("lm.style", "auto")
+    if (s != "auto") {
+        return s
+    }
+    if (lmUrl().indexOf("/v1") >= 0) {
+        return "openai"
+    }
+    return "ollama"
+}
+
+String lmApiKey() {
+    return pSecret("lm.api.key", "KOF_LM_API_KEY")
+}
+
 String lmUrl() {
     return config.str("lm.url", "http://localhost:11434")
 }
@@ -43,6 +65,9 @@ Int lmTempPercent() {
 }
 
 Bool lmAvailable() {
+    if (lmStyle() == "openai") {
+        return lmApiKey() != ""
+    }
     http.timeout(5)
     try {
         return http.status(lmUrl() + "/api/tags") == 200
@@ -51,17 +76,93 @@ Bool lmAvailable() {
     }
 }
 
-String httpPostSafe(String url, String body, String contentType) {
+String httpPostSafe(String url, String body, String contentType, String auth) {
     try {
+        if (auth != "") {
+            return http.post(url, body, contentType, auth)
+        }
         return http.post(url, body, contentType)
     } catch (Exception e) {
         return e.toString()
     }
 }
 
+String oaiUrl() {
+    var u = lmUrl()
+    if (u.endsWith("/v1")) {
+        return u + "/chat/completions"
+    }
+    if (u.endsWith("/")) {
+        u = u.substring(0, u.length - 1)
+    }
+    if (u.indexOf("/v1") < 0) {
+        return u + "/v1/chat/completions"
+    }
+    return u + "/chat/completions"
+}
+
 // Complete one exchange: system rules + user prompt -> raw model text.
 LmResult lmComplete(String system, String prompt) {
     var t0 = time.now()
+    if (lmStyle() == "openai") {
+        return lmCompleteOpenAi(system, prompt, t0)
+    }
+    return lmCompleteOllama(system, prompt, t0)
+}
+
+LmResult lmCompleteOpenAi(String system, String prompt, Long t0) {
+    var key = lmApiKey()
+    if (key == "") {
+        return LmResult("", false, "lm: LM_API_KEY missing (env KOF_LM_API_KEY) for openai endpoint", 0)
+    }
+    var body = "{\"model\":\"" + strings.escapeJson(lmModel()) + "\",\"messages\":["
+    if (system != "") {
+        body = body + "{\"role\":\"system\",\"content\":\"" + strings.escapeJson(system) + "\"},"
+    }
+    body = body + "{\"role\":\"user\",\"content\":\"" + strings.escapeJson(prompt) + "\"}],"
+    body = body + "\"stream\":false,\"temperature\":" + (lmTempPercent() / 100.0)
+    body = body + ",\"max_tokens\":" + lmTokens()
+    if (lmThink()) {
+        body = body + ",\"reasoning_effort\":\"medium\""
+    } else {
+        body = body + ",\"reasoning_effort\":\"none\""
+    }
+    body = body + "}"
+    http.timeout(lmTimeoutSec())
+    var h = spawn httpPostSafe(oaiUrl(), body, "Content-Type: application/json", "Authorization: Bearer " + key)
+    var raw = ""
+    var limitMs = lmTimeoutSec() * 1000 + 10000
+    while (time.now() - t0 < limitMs && !done(h)) {
+        time.sleep(50)
+    }
+    if (done(h)) {
+        var v = poll(h)
+        raw = v as String
+    }
+    var ms = (time.now() - t0) as Int
+    if (raw.startsWith("{\"error\":")) {
+        return LmResult("", false, "lm: server error: " + strings.truncate(raw, 300), ms)
+    }
+    if (raw == "") {
+        return LmResult("", false, "lm: no response from /chat/completions at " + lmUrl(), ms)
+    }
+    try {
+        var resp = json.decode<OaiResp>(raw)
+        var ch = resp.choices()
+        if (ch == null || ch.size() == 0) {
+            return LmResult("", false, "lm: openai response without choices | raw=" + strings.truncate(raw, 300), ms)
+        }
+        var msg = ch.get(0).message()
+        if (msg == null || msg.content() == null) {
+            return LmResult("", false, "lm: openai response without choices[0].message.content", ms)
+        }
+        return LmResult(msg.content(), true, "", ms)
+    } catch (String e) {
+        return LmResult("", false, "lm: " + e + " | url=" + oaiUrl() + " | raw=" + strings.truncate(raw, 400), ms)
+    }
+}
+
+LmResult lmCompleteOllama(String system, String prompt, Long t0) {
     var body = "{\"model\":\"" + strings.escapeJson(lmModel()) + "\",\"messages\":["
     if (system != "") {
         body = body + "{\"role\":\"system\",\"content\":\"" + strings.escapeJson(system) + "\"},"
@@ -75,7 +176,7 @@ LmResult lmComplete(String system, String prompt) {
     body = body + "\"stream\":false,\"options\":{\"temperature\":" + (lmTempPercent() / 100.0)
     body = body + ",\"num_predict\":" + lmTokens() + "}}"
     http.timeout(lmTimeoutSec())
-    var h = spawn httpPostSafe(lmUrl() + "/api/chat", body, "Content-Type: application/json")
+    var h = spawn httpPostSafe(lmUrl() + "/api/chat", body, "Content-Type: application/json", "")
     var raw = ""
     var limitMs = lmTimeoutSec() * 1000 + 10000
     while (time.now() - t0 < limitMs && !done(h)) {

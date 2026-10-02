@@ -84,16 +84,15 @@ List<String> sectionIds(String raw) {
         var t = line.trim()
         if (t.startsWith("## §")) {
             var id = ""
-            var i = 3
-            while (i < t.length) {
+            var i = 4
+            var cont = true
+            while (cont && i < t.length) {
                 var c = t.charAt(i)
                 if (c >= 48 && c <= 57) {
                     id = id + t.substring(i, i + 1)
                     i = i + 1
                 } else {
-                    if (id != "") {
-                        i = t.length
-                    }
+                    cont = false
                 }
             }
             if (id != "") {

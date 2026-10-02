@@ -132,6 +132,32 @@ mandatory unless the client sends `Prefer: return=representation` (which the
 LinkedIn target now does). A header face (`http.postResp -> {status, headers,
 body}`) would remove the trick; recorded as a stdlib gap.
 
+## BUG-9 — `kof.secrets` doc promises `env KOF_<NAME> > config`; JVM impl is bare `System.getenv(name)` (REPRODUCED 02/10)
+
+`learn/stdlib/secrets.md` shows `secrets.get("db_password")  // env KOF_DB_PASSWORD > config`.
+Measured on the installed 0.5.0-beta runtime: `JvmStringSecurityRuntime.kof_sec_secret_get`
+is literally `return System.getenv(name);` — NO `KOF_` prefix, NO config fallback.
+Probe (env `KOF_LM_API_KEY` exported): `secrets.get("LM_API_KEY","")=0`,
+`secrets.get("lm_api_key","")=0`, `config.env("KOF_LM_API_KEY")` sees 25 chars.
+Either the doc lies or the impl is unfinished; the publisher now resolves
+credentials through `config.str(...)` (which DOES honour KOF_ env mapping)
+with the literal env name as fallback (`pSecret` in `src/Targets.kf`).
+Candidate ledger: docs/impl divergence must be pinned by an executable test.
+
+## BUG-10 — incremental `kof build` does not regenerate the JSON decode overlay for NEW record types (REPRODUCED 02/10)
+
+Adding a new record used by `json.decode<T>()` (OaiResp) to a file already in
+the build set, then `kof build src --target jvm`, produced classes whose
+generated `dev/kof.runtime.KofRuntime` overlay still had the OLD decoder set
+(56 `decode_*` methods, no `decode_OaiResp`) -> runtime `NoSuchMethodError:
+KofRuntime.kof_json_decode_OaiResp` while `kof test` (fresh in-process
+compile) passed the identical decode. `rm -rf build/classes && kof build`
+regenerated the overlay (59 decoders) and the binary worked. The incremental
+path must detect new decodable types (or always regenerate the overlay).
+Workaround in use: full clean rebuild. (Same failure mode family as stale
+build/classes noted on 01/10 — one root cause: overlay generation keyed off
+the previous class set.)
+
 ## Notes (not bugs)
 
 - `config` precedence env `KOF_<KEY>` > `kof.config` — used by tests

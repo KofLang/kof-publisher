@@ -25,6 +25,20 @@ interface PublicationTarget {
     PublishOutcome publish(String text)
 }
 
+// Named-secret resolution with a REAL fallback: kof.secrets is documented
+// as "env KOF_<NAME> > config" but the JVM implementation is bare
+// System.getenv(name) (no prefix, no config) — docs/gaps-and-reports.md
+// BUG-9. The publisher therefore probes KOF_<NAME> through config first and
+// only then the literal env name, so credentials work through every honest
+// path without silently returning "".
+String pSecret(String dottedKey, String envName) {
+    var v = config.str(dottedKey, "")
+    if (v != "") {
+        return v
+    }
+    return secrets.get(envName, "")
+}
+
 String defaultPublisherHome() {
     var cfg = config.str("publisher.home", "")
     if (cfg != "") {
@@ -99,7 +113,7 @@ class LinkedInTarget implements PublicationTarget {
     }
 
     PublishOutcome publish(String text) {
-        var token = secrets.get("LINKEDIN_ACCESS_TOKEN", "")
+        var token = pSecret("linkedin.access.token", "KOF_LINKEDIN_ACCESS_TOKEN")
         if (token == "") {
             throw "linkedin: LINKEDIN_ACCESS_TOKEN missing (env KOF_LINKEDIN_ACCESS_TOKEN) — credentials NEVER go in the company .md"
         }
@@ -157,7 +171,7 @@ String extractLinkedId(String raw) {
 
 // LinkedIn target from secrets/config (throws a named error if missing).
 PublicationTarget linkedInFromSecrets() {
-    var urn = secrets.get("LINKEDIN_AUTHOR_URN", "")
+    var urn = pSecret("linkedin.author.urn", "KOF_LINKEDIN_AUTHOR_URN")
     if (urn == "") {
         throw "linkedin: LINKEDIN_AUTHOR_URN missing (env KOF_LINKEDIN_AUTHOR_URN or kof.config)"
     }
