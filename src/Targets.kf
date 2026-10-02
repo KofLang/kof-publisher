@@ -193,6 +193,14 @@ class LinkedInTarget implements PublicationTarget {
         if (id != "") {
             return PublishOutcome(id, raw)
         }
+        // Posts API 201 comes with an EMPTY body (GAP-5: id is only in the
+        // x-restli-id response header). A non-empty JSON error envelope was
+        // already handled by died/startsWith; empty/{} is SUCCESS — throwing
+        // here would trigger a retry and DUPLICATE the live post.
+        var t = raw.trim()
+        if (t == "" || t == "{}") {
+            return PublishOutcome("posted-" + time.now(), raw)
+        }
         throw "linkedin publish rejected: " + secrets.redact(strings.truncate(raw, 400))
     }
 }
