@@ -236,7 +236,7 @@ Int generateOne(Store store, Scheduler sched, Editorial ed, Company company, Str
         status = statusApproved()
     }
     var now = sched.nowStamp()
-    store.savePublication(Publication(id, company.name(), topic, draft, status, now, "", "", targetName, lmModel(), company.digest(), "", "", "", "", 0))
+    store.savePublication(Publication(id, company.name(), topic, draft, status, now, "", "", targetName, lmModel(), company.digest(), "", "", "", id, 0))
     println("OK " + id + "  [" + status + "]  " + strings.truncate(topic, 48))
     if (autoPublish) {
         var rep = sched.publishWithRetry("cli-" + id, "cli", "", id, topic, draft, now, targetName)
@@ -354,7 +354,9 @@ Int cmdCancel(Store store, Company company, String id) {
     return 1
 }
 
-Int cmdPublish(Store store, Company company, String id) {
+Int cmdPublish(Store store, Company company, List<String> args) {
+    var id = firstOperand(args)
+    var targetOverride = flagValue(args, "--target", "")
     var found = store.findPublication(id)
     if (found == null) {
         println("publisher: publicacao nao encontrada: " + id)
@@ -368,7 +370,11 @@ Int cmdPublish(Store store, Company company, String id) {
         return 1
     }
     var sched = Scheduler(store, company)
-    var rep = sched.publishWithRetry("manual-" + id, "manual", "", p.id(), p.topic(), p.content(), sched.nowStamp(), p.target())
+    var useTarget = p.target()
+    if (targetOverride != "") {
+        useTarget = targetOverride
+    }
+    var rep = sched.publishWithRetry("manual-" + id, "manual", "", p.id(), p.topic(), p.content(), sched.nowStamp(), useTarget)
     if (rep.result() == "published") {
         println("OK " + p.id() + " publicada: " + rep.detail())
         return 0
@@ -531,7 +537,7 @@ Int publisherMain(List<String> args) {
                 return cmdCancel(store, company, firstOperand(rest))
             }
             if (cmd == "publish") {
-                return cmdPublish(store, company, firstOperand(rest))
+                return cmdPublish(store, company, rest)
             }
             if (cmd == "schedule") {
                 return cmdSchedule(store, company, rest)

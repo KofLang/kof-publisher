@@ -39,6 +39,29 @@ String pSecret(String dottedKey, String envName) {
     return secrets.get(envName, "")
 }
 
+// ClipboardTarget — the honest interim: writes the approved text to the
+// X11 clipboard (xclip) so the author pastes into the Page/Group UI while
+// the Community Management app approval is pending. No fake automation.
+class ClipboardTarget implements PublicationTarget {
+    String name() {
+        return "clipboard"
+    }
+
+    PublishOutcome publish(String text) {
+        var f = File("/tmp/kof-publish-clipboard.txt")
+        if (!f.writeText(text)) {
+            throw "clipboard: falha ao gravar /tmp/kof-publish-clipboard.txt"
+        }
+        var h = process.run("xclip", "-selection", "clipboard", "-i", "/tmp/kof-publish-clipboard.txt")
+        if (h.exitCode == 0) {
+            return PublishOutcome("clipboard", "copiado para a area de transferencia")
+        }
+        // no xclip on the box: the text is staged in the file anyway —
+        // honest degradation, never a silent fake "published"
+        return PublishOutcome("clipboard", "arquivo /tmp/kof-publish-clipboard.txt (xclip indisponivel: " + strings.truncate(h.stderr, 120) + ")")
+    }
+}
+
 String defaultPublisherHome() {
     var cfg = config.str("publisher.home", "")
     if (cfg != "") {
@@ -107,12 +130,33 @@ class LinkedInTarget implements PublicationTarget {
         return "linkedin"
     }
 
+    // SAFETY GUARD: this project posts as the PAGE/GROUP. Publishing through
+    // a personal URN requires the operator to opt in explicitly
+    // (KOF_LINKEDIN_ALLOW_PERSONAL=true) — a misconfigured cron must never
+    // spray the author's personal profile. (Separated from publish() because
+    // an inline early-throw before the spawn/poll loop tripped a JVM
+    // VerifyError in 0.5.0-beta codegen — docs/gaps-and-reports.md BUG-11.)
+    Void checkAuthorPolicy() {
+        var isPerson = false
+        if (authorUrn.startsWith("urn:li:person")) {
+            isPerson = true
+        }
+        if (isPerson) {
+            var allow = pSecret("linkedin.allow.personal", "KOF_LINKEDIN_ALLOW_PERSONAL")
+            if (allow != "true") {
+                throw "linkedin: URN e de PERFIL PESSOAL e o publisher so posta como pagina — use o token CM (urn:li:organization) ou defina KOF_LINKEDIN_ALLOW_PERSONAL=true conscientemente"
+            }
+        }
+        return 0
+    }
+
     String bodyFor(String text) {
         return "{\"author\":\"" + authorUrn + "\",\"commentary\":\"" + strings.escapeJson(text)
             + "\",\"visibility\":\"PUBLIC\",\"distribution\":{\"feedDistribution\":\"MAIN_FEED\",\"targetEntities\":[],\"thirdPartyDistributionChannels\":[]},\"lifecycleState\":\"PUBLISHED\",\"isReshareDisabledByAuthor\":false}"
     }
 
     PublishOutcome publish(String text) {
+        checkAuthorPolicy()
         var token = pSecret("linkedin.access.token", "KOF_LINKEDIN_ACCESS_TOKEN")
         if (token == "") {
             throw "linkedin: LINKEDIN_ACCESS_TOKEN missing (env KOF_LINKEDIN_ACCESS_TOKEN) — credentials NEVER go in the company .md"
@@ -122,7 +166,7 @@ class LinkedInTarget implements PublicationTarget {
             "Content-Type: application/json",
             "Authorization: Bearer " + token,
             "X-Restli-Protocol-Version: 2.0.0",
-            "LinkedIn-Version: 202506",
+            "LinkedIn-Version: 202609",
             "Prefer: return=representation")
         var waited = 0
         var raw = ""
@@ -185,6 +229,9 @@ PublicationTarget? resolveTarget(String name) {
     }
     if (name == "dryrun") {
         return DryRunTarget(config.str("publisher.dryrun.dir", defaultPublisherHome() + "/dryrun"))
+    }
+    if (name == "clipboard") {
+        return ClipboardTarget()
     }
     return null
 }

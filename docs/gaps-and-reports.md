@@ -158,6 +158,32 @@ Workaround in use: full clean rebuild. (Same failure mode family as stale
 build/classes noted on 01/10 — one root cause: overlay generation keyed off
 the previous class set.)
 
+## BUG-11 — `LinkedInTarget.publish`: JVM VerifyError on class load (REPRODUCED 02/10, minimal repro EM ANDAMENTO)
+
+`publish <id> --target linkedin` dies loading the generated class:
+`VerifyError: Bad type on operand stack ... LinkedInTarget.publish @257:
+invokestatic; Type 'java.lang.Object' not assignable to 'java/lang/String'`.
+It is NOT the personal-URN guard (removed it and the error moved to @247,
+same shape) — it predates this code path and was invisible because every
+E2E so far used the `dryrun` target (the LinkedIn face had never loaded a
+`LinkedInTarget` class in a real run). Suspect area: the `spawn http.post`
+4-headers varargs + `poll(h) as String` + `secrets.redact` chain inside a
+class method. Standalone scratches compiling the same shapes pass, so the
+repro needs the exact publish() structure; filed as work-in-progress with
+the full stack saved in var/ (not committed). Honest note: the class NEVER
+loaded successfully — no LinkedIn post ever left this box through Kof code.
+
+## GAP-6 — Posts API refuses `urn:li:group:*` authors; `LinkedIn-Version` must be an active release date (MEDIDO 02/10)
+
+Live probe against `https://api.linkedin.com/rest/posts` with a member token:
+- `LinkedIn-Version: 202506`/`202610` -> 426 NONEXISTENT_VERSION ("20250601/
+20261001 is not active"); `202609` is active.
+- author `urn:li:group:40610004` -> 422: "author value ... is of type group.
+Allowed URN types are organization, person". **LinkedIn groups cannot be
+posted to via API**, even for the group owner; automation paths are member
+or organization (Community Management, request under review). Documented
+because the publisher's whole point is honest capability limits.
+
 ## Notes (not bugs)
 
 - `config` precedence env `KOF_<KEY>` > `kof.config` — used by tests

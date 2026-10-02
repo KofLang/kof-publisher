@@ -180,7 +180,7 @@ LabFacts labFacts(Company company, String markerPath) {
             opened.add(line)
         }
     }
-    var decided = firstLineWith(repo, "HEAD", "docs/development/DECISIONS.md", "## ")
+    var decided = firstLineWith(repo, "HEAD", "docs/development/DECISIONS.md", "## D-")
     var claimed = firstLineWith(repo, "HEAD", "DOING.md", "> **")
     if (subs.size() == 0 && opened.size() == 0) {
         return LabFacts(true, "", "SEM NOVIDADES NA JANELA", windowStart)
