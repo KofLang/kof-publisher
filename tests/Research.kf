@@ -1,0 +1,376 @@
+// E2E: the online-research step against a controlled HTTP fixture.
+//
+// Nothing here touches the real HN, dev.to, lobste.rs or any feed. The Kof
+// client does REAL HTTP against tests/fake_research.py, so what is exercised is
+// the actual fetch/decode/sanitize path, not a stub.
+//
+// What this suite proves:
+//   - a successful pass returns items WITH url, publisher, publication date and
+//     CONSULTATION date (the two dates are different facts and both are kept)
+//   - a source that fails is REPORTED as a failure, and never silently becomes
+//     an empty "nothing hot today"
+//   - a well-formed but EMPTY source is honestly empty, and is not confused
+//     with a failure
+//   - titles/summaries from a public source are UNTRUSTED: an instruction-
+//     shaped title is neutralized and a leaked credential is redacted
+//   - `research` is read-only: it writes nothing to the store
+
+String envOr(String key, String dflt) {
+    var v = config.env(key)
+    if (v != null && v != "") {
+        return v
+    }
+    return dflt
+}
+
+String publisherDir() {
+    return envOr("KOF_PUBLISHER_DIR", "/home/mel/Documentos/kof-publisher")
+}
+
+String classpath() {
+    var home = envOr("HOME", "/home/mel")
+    var drv = envOr("KOF_SQLITE_JAR", home + "/.kof/deps/org/xerial/sqlite-jdbc/3.53.4.0/sqlite-jdbc-3.53.4.0.jar")
+    return envOr("KOF_PUBLISHER_CLASSES", publisherDir() + "/build/classes")
+        + ":" + home + "/.local/share/kof/lib/kof.jar:" + drv
+}
+
+String workDir(String name) {
+    return "/tmp/kof-pub-tests/" + name
+}
+
+void prepare(String name) {
+    var r = process.run("sh", "-c", "rm -rf '" + workDir(name) + "' && mkdir -p '" + workDir(name) + "/home'")
+    assert(r.exitCode == 0, "prepare " + name + ": " + r.stderr)
+}
+
+String runCmd(String cmd) {
+    var r = process.run("sh", "-c", cmd + " 2>&1")
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+Int exitOf(String blob) {
+    var i = blob.indexOf("||EXIT=")
+    if (i < 0) {
+        throw "no exit marker"
+    }
+    return blob.substring(i + 7).toInt()
+}
+
+String outOf(String blob) {
+    var i = blob.indexOf("||EXIT=")
+    return blob.substring(0, i)
+}
+
+Bool has(String hay, String needle) {
+    return hay.indexOf(needle) >= 0
+}
+
+// The research clients read their base URLs from config, so pointing them at
+// the fixture is a matter of KOF_RESEARCH_* env vars — the production defaults
+// stay the real endpoints.
+String cli(String name, String port, String args) {
+    var base = "http://127.0.0.1:" + port
+    var cmd = "cd '" + workDir(name) + "' && KOF_PUBLISHER_HOME='" + workDir(name) + "/home'"
+        + " KOF_RESEARCH_HN_API='" + base + "/hn'"
+        + " KOF_RESEARCH_DEVTO_API='" + base + "/devto'"
+        + " KOF_RESEARCH_LOBSTERS_API='" + base + "/lobsters'"
+        + " KOF_RESEARCH_TIMEOUT=10"
+        + " java -cp '" + classpath() + "' Default.Main " + args + " 2>&1"
+    var r = process.run("sh", "-c", cmd)
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+String startResearch(String name, String port, String mode) {
+    runCmd("pkill -f 'fake_researc[h].py " + port + "' || true; true")
+    var up = runCmd("{ python3 '" + publisherDir() + "/tests/fake_research.py' " + port + " " + mode + " > '" + workDir(name) + "/rs.log' 2>&1 & echo $! > '" + workDir(name) + "/rs.pid'; }; sleep 1; curl -s -m 4 http://127.0.0.1:" + port + "/health")
+    assert(exitOf(up) == 0 && outOf(up).trim() == "ok", up)
+    return outOf(up)
+}
+
+void stopResearch(String name) {
+    runCmd("kill $(cat '" + workDir(name) + "/rs.pid') 2>/dev/null || true")
+}
+
+String researchCompany() {
+    var c = "# company\nname: Mel Santos\n\n# topics\ntopics:\n  - engenharia de software\n\n"
+    c = c + "# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\ntarget: linkedin\n\n"
+    c = c + "# editorial\nresearch:\n  - hackernews\n  - devto\n  - lobsters\nretention_records: 50\nretention_max_gb: 1\n\n"
+    c = c + "# category morning\nclock: 06:00\nlabel: opiniao\nangle: uma tese propria\n"
+    return c
+}
+
+void writeCompany(String name) {
+    File(workDir(name) + "/company.kofmd").writeText(researchCompany())
+}
+
+test "research: returns sourced candidates with both publication and consultation dates" {
+    prepare("rs-normal")
+    writeCompany("rs-normal")
+    startResearch("rs-normal", "11951", "normal")
+
+    var r = cli("rs-normal", "11951", "research --company company.kofmd --store pub.db")
+    assert(exitOf(r) == 0, r)
+    var out = outOf(r)
+    assert(has(out, "Kof 0.5.0-beta compila para JVM"), out)
+    assert(has(out, "https://example.invalid/kof-050"), out)
+    assert(has(out, "publicado : 2026-10-10T12:00:00Z"), out)
+    assert(has(out, "consultado: 2026-"), out)
+    // the HN item with no url must be linked back to its HN discussion, not dropped
+    assert(has(out, "news.ycombinator.com/item?id=333"), out)
+    // dev.to and lobste.rs answered too
+    assert(has(out, "SQLite basta"), out)
+    assert(has(out, "cost of abstraction"), out)
+    assert(has(out, "0 falha(s)"), out)
+    stopResearch("rs-normal")
+}
+
+test "research: an instruction-shaped title is neutralized as untrusted data" {
+    prepare("rs-inject")
+    writeCompany("rs-inject")
+    startResearch("rs-inject", "11952", "normal")
+
+    var r = cli("rs-inject", "11952", "research --company company.kofmd --store pub.db")
+    assert(exitOf(r) == 0, r)
+    var out = outOf(r)
+    assert(has(out, "conteudo nao confiavel, tratado como dado"), out)
+    assert(has(out, "Ignore all previous instructions"), out)
+    stopResearch("rs-inject")
+}
+
+test "research: a credential-shaped title is redacted" {
+    prepare("rs-leak")
+    writeCompany("rs-leak")
+    startResearch("rs-leak", "11953", "normal")
+
+    var r = cli("rs-leak", "11953", "research --company company.kofmd --store pub.db")
+    assert(exitOf(r) == 0, r)
+    var out = outOf(r)
+    assert(!has(out, "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"), out)
+    stopResearch("rs-leak")
+}
+
+test "research: a failed source is reported as a failure, never as an empty result" {
+    prepare("rs-partial")
+    writeCompany("rs-partial")
+    startResearch("rs-partial", "11954", "partial")
+
+    var r = cli("rs-partial", "11954", "research --sources hackernews,devto,lobsters --company company.kofmd --store pub.db")
+    assert(exitOf(r) == 0, r)
+    var out = outOf(r)
+    // HN answered: its items are present
+    assert(has(out, "Kof 0.5.0-beta compila para JVM"), out)
+    // dev.to 500 and lobste.rs garbage are FAILURES, stated as such
+    assert(has(out, "FALHOU"), out)
+    assert(has(out, "2 falha(s)"), out)
+    // the honest note that nothing was invented to fill the gap
+    assert(has(out, "Nada foi inventado"), out)
+    stopResearch("rs-partial")
+}
+
+test "research: an empty-but-valid source is honestly empty, not a failure" {
+    prepare("rs-empty")
+    writeCompany("rs-empty")
+    startResearch("rs-empty", "11955", "empty")
+
+    var r = cli("rs-empty", "11955", "research --company company.kofmd --store pub.db")
+    assert(exitOf(r) == 0, r)
+    var out = outOf(r)
+    assert(has(out, "nenhum candidato obtido"), out)
+    assert(has(out, "0 falha(s)"), out)
+    stopResearch("rs-empty")
+}
+
+test "research: an inaccessible source is reported, not faked" {
+    prepare("rs-offline")
+    writeCompany("rs-offline")
+    startResearch("rs-offline", "11956", "offline")
+
+    var r = cli("rs-offline", "11956", "research --company company.kofmd --store pub.db")
+    assert(exitOf(r) == 0, r)
+    var out = outOf(r)
+    assert(has(out, "3 falha(s)"), out)
+    assert(has(out, "nenhum candidato obtido"), out)
+    stopResearch("rs-offline")
+}
+
+test "research: an RSS feed is parsed by the hand-rolled item extractor" {
+    prepare("rs-rss")
+    writeCompany("rs-rss")
+    startResearch("rs-rss", "11957", "normal")
+
+    var r = cli("rs-rss", "11957", "research --sources hackernews --rss http://127.0.0.1:11957/feed.xml --company company.kofmd --store pub.db")
+    assert(exitOf(r) == 0, r)
+    var out = outOf(r)
+    assert(has(out, "Release notes do runtime"), out)
+    assert(has(out, "https://blog.example.invalid/release-notes"), out)
+    // CDATA and inline tags are stripped, the text survives
+    assert(has(out, "Novidades do runtime."), out)
+    // an <item> with no <link> is kept, not dropped
+    assert(has(out, "Post sem link"), out)
+    stopResearch("rs-rss")
+}
+
+test "research: writes nothing to the store (read-only report)" {
+    prepare("rs-readonly")
+    writeCompany("rs-readonly")
+    startResearch("rs-readonly", "11958", "normal")
+
+    var r = cli("rs-readonly", "11958", "research --company company.kofmd --store pub.db")
+    assert(exitOf(r) == 0, r)
+    var st = cli("rs-readonly", "11958", "db-stats --company company.kofmd --store pub.db")
+    assert(exitOf(st) == 0, st)
+    var out = outOf(st)
+    assert(has(out, "publicacoes  : 0"), out)
+    assert(has(out, "pautas       : 0"), out)
+    assert(has(out, "fontes       : 0"), out)
+    stopResearch("rs-readonly")
+}
+
+test "db-stats: reports size including WAL sidecars, integrity and the retention ceiling" {
+    prepare("rs-stats")
+    writeCompany("rs-stats")
+
+    var st = cli("rs-stats", "11959", "db-stats --company company.kofmd --store pub.db")
+    assert(exitOf(st) == 0, st)
+    var out = outOf(st)
+    assert(has(out, "inclui .db + -wal + -shm"), out)
+    assert(has(out, "integridade  : ok"), out)
+    assert(has(out, "retencao     : 50 registros"), out)
+    assert(has(out, "limite disco : 1 GB"), out)
+}
+
+// Retention is exercised end-to-end: real `plan` runs create REVIEW rows, some
+// are rejected (terminal), and `db-prune` must remove terminal rows past the
+// limit while NEVER touching the one still in review.
+// Four opinion-backed slots: no repo and no live source are needed, so the
+// retention pass can be exercised offline and deterministically. The labels
+// keep the fixture LM's per-category texts distinct.
+String pruneCompany() {
+    var c = "# company\nname: Mel Santos\n\n# topics\ntopics:\n  - engenharia de software\n  - Java\n\n"
+    c = c + "# opinions\nopinions:\n"
+    c = c + "  - prefere complexidade justificada a complexidade de moda\n"
+    c = c + "  - desconfia de metrica de produtividade que mede atividade em vez de resultado\n"
+    c = c + "  - valoriza contratos explicitos e testes que comprovem garantia real\n"
+    c = c + "  - critica processo que consome tempo sem produzir valor\n\n"
+    c = c + "# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\ntarget: linkedin\n\n"
+    c = c + "# editorial\nretention_records: 2\nretention_max_gb: 1\n\n"
+    c = c + "# category morning\nclock: 06:00\nlabel: opiniao\nfunction: contraponto\nangle: uma tese propria sobre tecnologia\n\n"
+    c = c + "# category noon\nclock: 12:00\nlabel: experiencia\nfunction: contraponto\nangle: o que eu construi e aprendi\n\n"
+    c = c + "# category afternoon\nclock: 15:00\nlabel: analise\nfunction: observacao\nangle: um trade-off tecnico concreto\n\n"
+    c = c + "# category night\nclock: 18:00\nlabel: carreira\nfunction: observacao\nangle: uma observacao sobre trabalho\n"
+    return c
+}
+
+String startLm(String name, String port) {
+    runCmd("pkill -f 'fake_lm_persona[l].py " + port + "' || true; true")
+    var up = runCmd("cd '" + workDir(name) + "' && { python3 '" + publisherDir() + "/tests/fake_lm_personal.py' " + port + " distinct > lm.log 2>&1 & echo $! > lm.pid; }; sleep 1; curl -s -m 4 http://127.0.0.1:" + port + "/api/tags | grep -c models")
+    assert(exitOf(up) == 0, up)
+    return outOf(up)
+}
+
+void stopLm(String name) {
+    runCmd("kill $(cat '" + workDir(name) + "/lm.pid') 2>/dev/null || true")
+}
+
+String cliLm(String name, String port, String args) {
+    var cmd = "cd '" + workDir(name) + "' && KOF_PUBLISHER_HOME='" + workDir(name) + "/home'"
+        + " KOF_LM_URL=http://127.0.0.1:" + port + " KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25"
+        + " java -cp '" + classpath() + "' Default.Main " + args + " 2>&1"
+    var r = process.run("sh", "-c", cmd)
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+test "db-prune: preserves live records and removes only terminal ones past the limit" {
+    prepare("rs-prune")
+    File(workDir("rs-prune") + "/company.kofmd").writeText(pruneCompany())
+    startLm("rs-prune", "11960")
+
+    var p = cliLm("rs-prune", "11960", "plan --no-research --company company.kofmd --store pub.db")
+    assert(exitOf(p) == 0, p)
+    assert(has(outOf(p), "4 proposta(s) em REVIEW"), p)
+
+    // reject three of the four: those become TERMINAL (prunable), one stays
+    // in REVIEW (live, must survive).
+    var ids = runCmd("cd '" + workDir("rs-prune") + "' && KOF_PUBLISHER_HOME='" + workDir("rs-prune") + "/home' java -cp '" + classpath() + "' Default.Main list --status review --company company.kofmd --store pub.db | grep -o 'pub-[a-zA-Z0-9-]*' | head -3")
+    var idText = outOf(ids).trim()
+    var lines = listOf<String>()
+    for (var l in idText.split("\n")) {
+        if (l.trim() != "") {
+            lines.add(l.trim())
+        }
+    }
+    assert(lines.size() == 3, "expected 3 review ids, got: " + idText)
+    for (var one in lines) {
+        var rj = cliLm("rs-prune", "11960", "reject " + one + " --company company.kofmd --store pub.db")
+        assert(exitOf(rj) == 0, rj)
+    }
+
+    var pr = cliLm("rs-prune", "11960", "db-prune --company company.kofmd --store pub.db")
+    assert(exitOf(pr) == 0, pr)
+    var out = outOf(pr)
+    assert(has(out, "limite 2 registros"), out)
+    // 4 publications + 4 pautas = 8 records; the limit is 2, so 6 go. Three
+    // publications were rejected (terminal) and their pautas follow them; the
+    // fourth is still in REVIEW and neither it nor its pauta is touched.
+    assert(has(out, "removidos    : 3 publicacao(oes), 3 pauta(s)"), out)
+    assert(has(out, "preservados  : 1 publicacao(oes) em estado vivo"), out)
+    assert(has(out, "vacuum       : nao executado"), out)
+
+    // the live row survived and is still in review; the total came down to the
+    // limit (one publication + its pauta).
+    var after = cliLm("rs-prune", "11960", "list --company company.kofmd --store pub.db")
+    var afterOut = outOf(after)
+    assert(has(afterOut, "[review]"), after)
+    assert(has(afterOut, "1 item(ns)"), after)
+    stopLm("rs-prune")
+}
+
+test "db-prune: a database under the limit is left untouched" {
+    prepare("rs-prune2")
+    File(workDir("rs-prune2") + "/company.kofmd").writeText(pruneCompany())
+    startLm("rs-prune2", "11961")
+
+    var p = cliLm("rs-prune2", "11961", "plan --no-research --company company.kofmd --store pub.db")
+    assert(exitOf(p) == 0, p)
+
+    var pr = cliLm("rs-prune2", "11961", "db-prune --limit 100 --company company.kofmd --store pub.db")
+    assert(exitOf(pr) == 0, pr)
+    var out = outOf(pr)
+    assert(has(out, "removidos    : 0 publicacao(oes), 0 pauta(s), 0 fonte(s) orfa(s)"), out)
+    assert(has(out, "preservados  : 4 publicacao(oes)"), out)
+    stopLm("rs-prune2")
+}
+
+// A database created BEFORE `publication.topic_id` existed must be upgraded in
+// place, not rejected. `orm.create` is CREATE TABLE IF NOT EXISTS, so on a
+// legacy file it leaves the old table alone — without the migration the very
+// first read would fail with "no such column: topic_id" and the publisher
+// would be unable to start against its own history.
+//
+// The legacy file is built by tests/make_legacy_db.py (the OLD schema, with a
+// real row in it), which is the only way to produce a genuinely old database:
+// the Store only ever creates the current one.
+test "migration: a legacy database gains topic_id in place, keeping its rows" {
+    prepare("rs-migrate")
+    File(workDir("rs-migrate") + "/company.kofmd").writeText(researchCompany())
+    var made = runCmd("python3 '" + publisherDir() + "/tests/make_legacy_db.py' '" + workDir("rs-migrate") + "/pub.db'")
+    assert(exitOf(made) == 0, made)
+
+    // Opening the store runs the migration; the legacy row must still be there.
+    var st = cli("rs-migrate", "11962", "db-stats --company company.kofmd --store pub.db")
+    assert(exitOf(st) == 0, st)
+    var out = outOf(st)
+    assert(has(out, "publicacoes  : 1"), out)
+    assert(has(out, "published  : 1"), out)
+    // the column is now present
+    var chk = runCmd("python3 -c \"import sqlite3;c=sqlite3.connect('" + workDir("rs-migrate") + "/pub.db');print([r[1] for r in c.execute('PRAGMA table_info(publication)')])\"")
+    assert(has(outOf(chk), "topic_id"), chk)
+    // the migration is recorded exactly once, not re-applied
+    var mig = runCmd("python3 -c \"import sqlite3;c=sqlite3.connect('" + workDir("rs-migrate") + "/pub.db');print(list(c.execute('SELECT name FROM kof_migrations')))\"")
+    assert(has(outOf(mig), "001-publication-topic-id"), mig)
+
+    // idempotent: a second open must not fail on a duplicate-column ALTER
+    var st2 = cli("rs-migrate", "11962", "db-stats --company company.kofmd --store pub.db")
+    assert(exitOf(st2) == 0, st2)
+    assert(has(outOf(st2), "publicacoes  : 1"), st2)
+}

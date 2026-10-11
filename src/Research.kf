@@ -1,0 +1,568 @@
+
+
+// Research — CURRENT information sources for the editorial pipeline.
+//
+// This is the online-research step the editorial flow was missing: instead of
+// picking a topic from a static model memory, the Publisher consults real
+// sources, records WHAT it read and WHEN, and carries those items into topic
+// selection with their URLs and dates attached.
+//
+// Sources are deliberately a CURATED LIST, not "the internet": there is no
+// general free web search. Each client below is a documented, reachable
+// endpoint. If one is unavailable the outcome says so honestly — it never
+// invents items to fill the gap.
+//
+//   hackernews  Hacker News (Algolia API, JSON)   — front page and keyword search
+//   devto       dev.to (public API, JSON)         — top articles
+//   lobsters    lobste.rs (JSON)                  — hottest stories
+//   rss         any feed URL from config          — hand-rolled <item> reader
+//   trends      NOT IMPLEMENTED (see trendsSignal)
+//
+// SECURITY (audit lesson): everything that comes back from a public source is
+// UNTRUSTED DATA. Titles and summaries pass through `sanitizeUntrusted`, so a
+// hostile title that reads like an instruction is marked as data and can never
+// be mistaken for a rule of this system.
+//
+// NOTE ON `spawn`: a spawn lambda must not call an instance method of an
+// enclosing class — the 0.5.0-beta compiler emits the lambda's own `this` and
+// the class fails JVM verification (measured on the LinkedIn publish path,
+// docs/auditoria-adversarial-2026-10-11.md AUD-8). Every function here is
+// free, which is why these calls are safe.
+
+record ResearchItem(
+    String topic_key,
+    String title,
+    String url,
+    String publisher,
+    String published_at,
+    String fetched_at,
+    String summary,
+    String source_type,
+    Int score)
+
+record ResearchResp(Bool ok, String body, String error)
+
+record ResearchOutcome(Bool ok, List<ResearchItem> items, String error, String detail)
+
+// ---- JSON shapes of the sources ----
+
+record HnHit(String title, String url, String created_at, Int points, String objectID)
+record HnResp(List<HnHit> hits)
+
+record DevArticle(String title, String url, String published_at, String description, Int positive_reactions_count)
+
+record LobStory(String title, String url, String created_at, Int score, Int comment_count)
+
+// ---- config (every base URL is overridable, which is the test hook) ----
+
+String researchHnApi() {
+    return config.str("research.hn.api", "https://hn.algolia.com/api/v1")
+}
+
+String researchDevtoApi() {
+    return config.str("research.devto.api", "https://dev.to/api")
+}
+
+String researchLobstersApi() {
+    return config.str("research.lobsters.api", "https://lobste.rs")
+}
+
+// Empty by default: there is NO free Google Trends API (measured: the public
+// dailytrends endpoint answers 404). A working endpoint can be supplied here
+// (an own proxy, a paid API, an internal feed) and the trends client below
+// starts reporting honestly. Without one, trends stays an explicit gap.
+String researchTrendsApi() {
+    return config.str("research.trends.api", "")
+}
+
+Int researchTimeout() {
+    return config.int("research.timeout", 20)
+}
+
+Int researchMaxItems() {
+    return config.int("research.max.items", 40)
+}
+
+// ISO-8601 stamp with the profile's explicit offset — same convention as the
+// rest of the store (never bare, never silent UTC).
+String researchStamp(String tz) {
+    var sp = localOf(tz, time.now())
+    if (sp == null) {
+        return ""
+    }
+    return isoOf(sp)
+}
+
+// ---- HTTP (free function only — see the spawn note above) ----
+
+String researchHttpGetSafe(String url, String accept) {
+    try {
+        return http.get(url, "Accept: " + accept, "User-Agent: kof-publisher")
+    } catch (Exception e) {
+        return "__KOF_RESEARCH_ERR__" + e.toString()
+    }
+}
+
+ResearchResp researchGet(String url, String accept) {
+    http.timeout(researchTimeout())
+    var h = spawn researchHttpGetSafe(url, accept)
+    var waited = 0
+    var limitMs = researchTimeout() * 1000 + 10000
+    while (waited < limitMs && !done(h)) {
+        time.sleep(50)
+        waited = waited + 50
+    }
+    if (!done(h)) {
+        return ResearchResp(false, "", "research: requisicao ainda em execucao apos o timeout (" + url + ")")
+    }
+    var v = poll(h)
+    var raw = v as String
+    if (raw.startsWith("__KOF_RESEARCH_ERR__")) {
+        return ResearchResp(false, "", "research: " + raw.substring(20, raw.length))
+    }
+    if (raw.trim() == "") {
+        return ResearchResp(false, "", "research: resposta vazia (" + url + ")")
+    }
+    return ResearchResp(true, raw, "")
+}
+
+// ---- item construction ----
+
+String researchKey(String title) {
+    var k = strings.slugify(title.trim())
+    if (k == "") {
+        k = strings.slugify(strings.truncate(title, 40))
+    }
+    return strings.truncate(k, 70)
+}
+
+// A title/summary from a public source is DATA. It is sanitized for secrets and
+// marked when it reads like an instruction, exactly like a README.
+ResearchItem researchItem(
+    String title,
+    String url,
+    String publisher,
+    String publishedAt,
+    String fetchedAt,
+    String summary,
+    String sourceType,
+    Int score) {
+    return ResearchItem(
+        researchKey(title),
+        strings.truncate(sanitizeUntrusted(title), 200),
+        url,
+        publisher,
+        publishedAt,
+        fetchedAt,
+        strings.truncate(sanitizeUntrusted(summary), 300),
+        sourceType,
+        score)
+}
+
+// ---- shape checks ----
+//
+// kof.http returns the BODY only — no status, no headers — so a 404/500 that
+// answers JSON (dev.to sends {"error":...}, most APIs send {"message":...}) is
+// indistinguishable from a successful call at the transport level. Left
+// unchecked it decodes into an empty list and is reported as "nothing hot
+// today", which is a FALSE CLAIM about the state of the world.
+//
+// So each client validates the SHAPE it was promised. This is the AUD-5 lesson
+// (a truncated listing must never be read as "this account has no repos")
+// applied to research: an answer that is not the promised shape is a FAILED
+// READ, and it says so.
+Bool looksLikeJsonArray(String body) {
+    return body.trim().startsWith("[")
+}
+
+Bool looksLikeJsonObject(String body) {
+    return body.trim().startsWith("{")
+}
+
+// Minimal query encoding: the search terms here are plain words, so joining
+// them with "+" is enough and avoids pulling in a URL-encoder.
+String researchQueryEncode(String s) {
+    var out = ""
+    for (var p in s.trim().split(" ")) {
+        if (p == "") {
+            continue
+        }
+        if (out != "") {
+            out = out + "+"
+        }
+        out = out + p
+    }
+    return out
+}
+
+// ---- Hacker News (Algolia) ----
+
+ResearchOutcome researchHn(String tz, String query) {
+    var url = researchHnApi() + "/search?tags=front_page&hitsPerPage=20"
+    if (query.trim() != "") {
+        url = researchHnApi() + "/search?query=" + researchQueryEncode(query) + "&tags=story&hitsPerPage=20"
+    }
+    var r = researchGet(url, "application/json")
+    if (!r.ok()) {
+        return ResearchOutcome(false, listOf<ResearchItem>(), r.error(), "hackernews")
+    }
+    if (!looksLikeJsonObject(r.body())) {
+        return ResearchOutcome(false, listOf<ResearchItem>(), "research: o Hacker News nao respondeu um objeto JSON (resposta provavelmente de erro) — leitura FALHOU, nada foi assumido", "hackernews")
+    }
+    try {
+        var resp = json.decode<HnResp>(r.body())
+        // A JSON object WITHOUT the promised `hits` field is an error body
+        // (Algolia answers {"message": ...} on a bad query), not "no stories".
+        var hits = resp.hits()
+        if (hits == null) {
+            return ResearchOutcome(false, listOf<ResearchItem>(), "research: o Hacker News respondeu um objeto sem o campo 'hits' — leitura FALHOU, nada foi assumido", "hackernews")
+        }
+        var out = listOf<ResearchItem>()
+        var stamp = researchStamp(tz)
+        for (var h in hits) {
+            var link = h.url()
+            if (link == null || link == "") {
+                link = "https://news.ycombinator.com/item?id=" + h.objectID()
+            }
+            var t = h.title()
+            if (t == null || t == "") {
+                continue
+            }
+            out.add(researchItem(t, link, "Hacker News", h.created_at(), stamp, "" + h.points() + " pontos na front page", "agregador", h.points()))
+        }
+        return ResearchOutcome(true, out, "", "hackernews: " + out.size() + " item(ns)")
+    } catch (String e) {
+        return ResearchOutcome(false, listOf<ResearchItem>(), "research: resposta ilegivel do Hacker News (" + strings.truncate(e, 120) + ")", "hackernews")
+    }
+}
+
+// ---- dev.to ----
+
+ResearchOutcome researchDevTo(String tz) {
+    var r = researchGet(researchDevtoApi() + "/articles?top=1&per_page=20", "application/json")
+    if (!r.ok()) {
+        return ResearchOutcome(false, listOf<ResearchItem>(), r.error(), "devto")
+    }
+    if (!looksLikeJsonArray(r.body())) {
+        return ResearchOutcome(false, listOf<ResearchItem>(), "research: o dev.to nao respondeu um array JSON (resposta provavelmente de erro) — leitura FALHOU, nada foi assumido", "devto")
+    }
+    try {
+        var arr = json.decode<List<DevArticle>>(r.body())
+        var out = listOf<ResearchItem>()
+        var stamp = researchStamp(tz)
+        for (var a in arr) {
+            var t = a.title()
+            if (t == null || t == "") {
+                continue
+            }
+            out.add(researchItem(t, a.url(), "dev.to", a.published_at(), stamp, a.description(), "blog", a.positive_reactions_count()))
+        }
+        return ResearchOutcome(true, out, "", "devto: " + out.size() + " item(ns)")
+    } catch (String e) {
+        return ResearchOutcome(false, listOf<ResearchItem>(), "research: resposta ilegivel do dev.to (" + strings.truncate(e, 120) + ")", "devto")
+    }
+}
+
+// ---- lobste.rs ----
+
+ResearchOutcome researchLobsters(String tz) {
+    var r = researchGet(researchLobstersApi() + "/hottest.json", "application/json")
+    if (!r.ok()) {
+        return ResearchOutcome(false, listOf<ResearchItem>(), r.error(), "lobsters")
+    }
+    if (!looksLikeJsonArray(r.body())) {
+        return ResearchOutcome(false, listOf<ResearchItem>(), "research: o lobste.rs nao respondeu um array JSON (resposta provavelmente de erro) — leitura FALHOU, nada foi assumido", "lobsters")
+    }
+    try {
+        var arr = json.decode<List<LobStory>>(r.body())
+        var out = listOf<ResearchItem>()
+        var stamp = researchStamp(tz)
+        for (var s in arr) {
+            var t = s.title()
+            if (t == null || t == "") {
+                continue
+            }
+            var link = s.url()
+            if (link == null || link == "") {
+                link = "https://lobste.rs/s/" + researchKey(t)
+            }
+            out.add(researchItem(t, link, "lobste.rs", s.created_at(), stamp, "" + s.score() + " pontos, " + s.comment_count() + " comentarios", "agregador", s.score()))
+        }
+        return ResearchOutcome(true, out, "", "lobsters: " + out.size() + " item(ns)")
+    } catch (String e) {
+        return ResearchOutcome(false, listOf<ResearchItem>(), "research: resposta ilegivel do lobste.rs (" + strings.truncate(e, 120) + ")", "lobsters")
+    }
+}
+
+// ---- RSS / Atom (hand-rolled: Kof has no XML parser) ----
+//
+// This is intentionally a MINIMAL reader: it pulls <item>/<entry> blocks and a
+// few known child tags. It is fragile by construction — a feed with unusual
+// markup will yield fewer or zero items, and that shows up as an honest empty
+// result, never as invented content. Prefer the JSON sources above; use RSS
+// for feeds that have no JSON face.
+
+String stripCdata(String s) {
+    var t = s.trim()
+    if (t.startsWith("<![CDATA[")) {
+        var e = t.indexOf("]]>")
+        if (e >= 0) {
+            return t.substring(9, e)
+        }
+    }
+    return t
+}
+
+String xmlInner(String block, String tag) {
+    var open = "<" + tag
+    var a = block.indexOf(open)
+    if (a < 0) {
+        return ""
+    }
+    var gt = block.indexOf(">", a)
+    if (gt < 0) {
+        return ""
+    }
+    // a self-closing/empty tag yields nothing
+    var close = "</" + tag + ">"
+    var b = block.indexOf(close, gt)
+    if (b < 0) {
+        return ""
+    }
+    return stripCdata(block.substring(gt + 1, b)).trim()
+}
+
+List<String> rssBlocks(String raw, String tag) {
+    var out = listOf<String>()
+    var open = "<" + tag
+    var close = "</" + tag + ">"
+    var i = 0
+    while (i < raw.length) {
+        var a = raw.indexOf(open, i)
+        if (a < 0) {
+            break
+        }
+        var b = raw.indexOf(close, a)
+        if (b < 0) {
+            break
+        }
+        out.add(raw.substring(a, b))
+        i = b + close.length
+    }
+    return out
+}
+
+String xmlStripTags(String s) {
+    var out = ""
+    var i = 0
+    var inTag = false
+    while (i < s.length) {
+        var c = s.charAt(i)
+        if (c == 60) {
+            inTag = true
+        } else {
+            if (c == 62) {
+                inTag = false
+            } else {
+                if (!inTag) {
+                    out = out + c
+                }
+            }
+        }
+        i = i + 1
+    }
+    return strings.normalizeWhitespace(out).trim()
+}
+
+ResearchOutcome researchRss(String feedUrl, String tz, String publisher) {
+    var r = researchGet(feedUrl, "application/rss+xml, application/atom+xml, application/xml, text/xml")
+    if (!r.ok()) {
+        return ResearchOutcome(false, listOf<ResearchItem>(), r.error(), "rss:" + feedUrl)
+    }
+    var raw = r.body()
+    var blocks = rssBlocks(raw, "item")
+    if (blocks.size() == 0) {
+        blocks = rssBlocks(raw, "entry")
+    }
+    if (blocks.size() == 0) {
+        return ResearchOutcome(false, listOf<ResearchItem>(), "research: feed sem <item>/<entry> legivel (" + feedUrl + ")", "rss:" + feedUrl)
+    }
+    var out = listOf<ResearchItem>()
+    var stamp = researchStamp(tz)
+    for (var b in blocks) {
+        var t = xmlInner(b, "title")
+        if (t == "") {
+            continue
+        }
+        var link = xmlInner(b, "link")
+        if (link == "") {
+            // Atom puts the URL in an attribute: <link href="..."/>
+            var a = b.indexOf("<link")
+            if (a >= 0) {
+                var hp = b.indexOf("href=", a)
+                if (hp >= 0) {
+                    var q1 = b.indexOf("\"", hp)
+                    if (q1 >= 0) {
+                        var q2 = b.indexOf("\"", q1 + 1)
+                        if (q2 > q1) {
+                            link = b.substring(q1 + 1, q2)
+                        }
+                    }
+                }
+            }
+        }
+        var date = xmlInner(b, "pubDate")
+        if (date == "") {
+            date = xmlInner(b, "published")
+        }
+        if (date == "") {
+            date = xmlInner(b, "updated")
+        }
+        var desc = xmlStripTags(xmlInner(b, "description"))
+        if (desc == "") {
+            desc = xmlStripTags(xmlInner(b, "summary"))
+        }
+        out.add(researchItem(t, link, publisher, date, stamp, desc, "rss", 0))
+    }
+    return ResearchOutcome(true, out, "", "rss(" + publisher + "): " + out.size() + " item(ns)")
+}
+
+// ---- trends (explicitly NOT implemented by default) ----
+//
+// There is no free Google Trends API. Measured on 2026-10-11: the public
+// dailytrends endpoint answers HTTP 404, and scraping the internal endpoint is
+// fragile and sits in a terms-of-use grey zone. The spec is explicit about this
+// case: when a source is not accessible, use alternatives and document the
+// limitation. The alternatives ARE the sources above — a trending list is a
+// signal to investigate, never a truth, and HN/dev.to/lobste.rs already give a
+// technical "what is hot" signal with a documented, stable API.
+//
+// If `research.trends.api` is set to an endpoint that returns JSON items, this
+// client uses it. Otherwise it reports the gap honestly.
+ResearchOutcome trendsSignal(String tz) {
+    var api = researchTrendsApi()
+    if (api == "") {
+        return ResearchOutcome(false, listOf<ResearchItem>(), "trends: indisponivel — sem API gratuita (Google Trends responde 404); usando HN/dev.to/lobste.rs como sinal de atualidade", "trends")
+    }
+    var r = researchGet(api, "application/json")
+    if (!r.ok()) {
+        return ResearchOutcome(false, listOf<ResearchItem>(), r.error(), "trends")
+    }
+    try {
+        var arr = json.decode<List<DevArticle>>(r.body())
+        var out = listOf<ResearchItem>()
+        var stamp = researchStamp(tz)
+        for (var a in arr) {
+            out.add(researchItem(a.title(), a.url(), "trends", a.published_at(), stamp, a.description(), "tendencia", a.positive_reactions_count()))
+        }
+        return ResearchOutcome(true, out, "", "trends: " + out.size() + " item(ns)")
+    } catch (String e) {
+        return ResearchOutcome(false, listOf<ResearchItem>(), "trends: resposta ilegivel (" + strings.truncate(e, 120) + ")", "trends")
+    }
+}
+
+// ---- aggregation ----
+
+Bool researchContains(List<ResearchItem> items, String url) {
+    for (var i in items) {
+        if (i.url() == url) {
+            return true
+        }
+    }
+    return false
+}
+
+// One research pass. `sources` names the clients to run (hackernews, devto,
+// lobsters, rss, trends). Failures are COLLECTED, not thrown: a dead source
+// must not kill the whole pass, and it must be visible in the report.
+record ResearchRun(List<ResearchItem> items, List<String> notes, Int failures)
+
+ResearchRun researchRun(String tz, List<String> sources, List<String> rssUrls, String query) {
+    var items = listOf<ResearchItem>()
+    var notes = listOf<String>()
+    var failures = 0
+
+    for (var s in sources) {
+        var o = ResearchOutcome(false, listOf<ResearchItem>(), "", "")
+        if (s == "hackernews") {
+            o = researchHn(tz, query)
+        } else {
+            if (s == "devto") {
+                o = researchDevTo(tz)
+            } else {
+                if (s == "lobsters") {
+                    o = researchLobsters(tz)
+                } else {
+                    if (s == "trends") {
+                        o = trendsSignal(tz)
+                    } else {
+                        continue
+                    }
+                }
+            }
+        }
+        if (o.ok()) {
+            var added = 0
+            for (var it in o.items()) {
+                if (!researchContains(items, it.url())) {
+                    items.add(it)
+                    added = added + 1
+                }
+            }
+            notes.add(o.detail() + " (" + added + " novo(s))")
+        } else {
+            failures = failures + 1
+            notes.add("FALHOU " + o.detail() + ": " + o.error())
+        }
+    }
+
+    for (var u in rssUrls) {
+        if (u.trim() == "") {
+            continue
+        }
+        var o = researchRss(u.trim(), tz, "rss")
+        if (o.ok()) {
+            var added = 0
+            for (var it in o.items()) {
+                if (!researchContains(items, it.url())) {
+                    items.add(it)
+                    added = added + 1
+                }
+            }
+            notes.add(o.detail() + " (" + added + " novo(s))")
+        } else {
+            failures = failures + 1
+            notes.add("FALHOU " + o.detail() + ": " + o.error())
+        }
+    }
+
+    // cap, keeping the highest-scored items first (stable for equal scores)
+    var capped = listOf<ResearchItem>()
+    var max = researchMaxItems()
+    if (items.size() <= max) {
+        capped = items
+    } else {
+        var sorted = listOf<ResearchItem>()
+        for (var it in items) {
+            sorted.add(it)
+        }
+        // insertion sort by score desc — small lists, no sort primitive needed
+        var i = 1
+        while (i < sorted.size()) {
+            var cur = sorted.get(i)
+            var j = i - 1
+            while (j >= 0 && sorted.get(j).score() < cur.score()) {
+                sorted.set(j + 1, sorted.get(j))
+                j = j - 1
+            }
+            sorted.set(j + 1, cur)
+            i = i + 1
+        }
+        var k = 0
+        while (k < max && k < sorted.size()) {
+            capped.add(sorted.get(k))
+            k = k + 1
+        }
+    }
+    return ResearchRun(capped, notes, failures)
+}

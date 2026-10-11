@@ -1,0 +1,672 @@
+
+
+// Planning — topic selection for the four daily editorial functions.
+//
+// The publisher does not "think of something to post". Each slot has a JOB
+// (its `function`), and planning means finding the best AVAILABLE evidence for
+// that job, in this order of preference:
+//
+//   projetos    real repository activity, read from the persisted GitHub
+//               analysis (a repo whose pushed_at moved is a fact; a README is
+//               documentation, not proof)
+//   noticias    a story actually fetched from a current source, with its URL
+//               and its publication date
+//   contraponto the author's REGISTERED opinions, optionally hooked to
+//               something current to push against
+//   observacao  the author's registered opinions, principles and facts
+//
+// When a slot has no evidence good enough, it is LEFT EMPTY and the reason is
+// reported. Filling a slot with a manufactured topic is the one failure mode
+// this module exists to prevent.
+//
+// Scoring is deliberately simple and printed in full: four components, each
+// bounded, summed to 0..100. There is no hidden weighting and no model vote —
+// a human reading the output can see exactly why one candidate beat another.
+
+// ---- dates from external sources ----
+//
+// External feeds are not consistent: GitHub sends "2026-09-30T00:00:00Z",
+// Algolia sends "2026-10-10T12:00:00Z", RSS sends RFC-822
+// ("Fri, 10 Oct 2026 10:00:00 -0300") and some feeds send a bare date. A date
+// that cannot be recognised is NOT guessed at — the candidate keeps the raw
+// string and scores 0 on recency, with the limitation printed.
+
+List<String> planMonths() {
+    var m = listOf<String>()
+    m.add("jan")
+    m.add("feb")
+    m.add("mar")
+    m.add("apr")
+    m.add("may")
+    m.add("jun")
+    m.add("jul")
+    m.add("aug")
+    m.add("sep")
+    m.add("oct")
+    m.add("nov")
+    m.add("dec")
+    return m
+}
+
+Int planMonthOf(String name) {
+    var n = name.trim().toLowerCase()
+    var i = 0
+    for (var m in planMonths()) {
+        if (n.startsWith(m)) {
+            return i + 1
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+Bool planDigits(String s) {
+    if (s.length == 0) {
+        return false
+    }
+    var i = 0
+    while (i < s.length) {
+        var c = s.charAt(i)
+        if (c < 48 || c > 57) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Offset in hours from a tail like "Z", "+00:00", "-0300", "+02". 0 when the
+// string carries no offset (treated as UTC) — the caller records that choice.
+Int planOffsetOf(String tail) {
+    var t = tail.trim()
+    if (t == "" || t == "Z" || t == "z") {
+        return 0
+    }
+    var sign = 1
+    if (t.startsWith("-")) {
+        sign = -1
+        t = t.substring(1, t.length)
+    } else {
+        if (t.startsWith("+")) {
+            t = t.substring(1, t.length)
+        }
+    }
+    t = t.replace(":", "")
+    if (!planDigits(t)) {
+        return 0
+    }
+    var h = 0
+    var m = 0
+    if (t.length >= 4) {
+        h = toIntStr(t.substring(0, 2))
+        m = toIntStr(t.substring(2, 4))
+    } else {
+        if (t.length == 3) {
+            h = toIntStr(t.substring(0, 1))
+            m = toIntStr(t.substring(1, 3))
+        } else {
+            if (t.length == 2) {
+                h = toIntStr(t)
+            } else {
+                h = toIntStr(t)
+            }
+        }
+    }
+    return sign * (h * 60 + m) / 60
+}
+
+// Epoch ms of an external date string, or -1L when it is not recognisable.
+Long planParseWhen(String raw) {
+    var s = raw.trim()
+    if (s == "") {
+        return -1L
+    }
+    // ISO shape: 2026-10-10T12:00:00Z / 2026-10-10T12:00:00-03:00 / 2026-10-10
+    if (s.length >= 10 && s.charAt(4) == 45 && s.charAt(7) == 45) {
+        var ymd = s.substring(0, 10).split("-")
+        if (ymd.length == 3 && planDigits(ymd[0]) && planDigits(ymd[1]) && planDigits(ymd[2])) {
+            var minutes = 0
+            var off = 0
+            if (s.length >= 16 && s.charAt(10) == 84) {
+                var hm = s.substring(11, 16).split(":")
+                if (hm.length == 2 && planDigits(hm[0]) && planDigits(hm[1])) {
+                    minutes = toIntStr(hm[0]) * 60 + toIntStr(hm[1])
+                }
+                if (s.length > 19) {
+                    off = planOffsetOf(s.substring(19, s.length))
+                }
+            }
+            return utcMsOf(toIntStr(ymd[0]), toIntStr(ymd[1]), toIntStr(ymd[2]), minutes) - ((off as Long) * 3600000L)
+        }
+        return -1L
+    }
+    // RFC-822 shape: "Fri, 10 Oct 2026 10:00:00 -0300"
+    var parts = s.split(" ")
+    var clean = listOf<String>()
+    for (var p in parts) {
+        var t = p.trim()
+        if (t != "") {
+            clean.add(t)
+        }
+    }
+    if (clean.size < 5) {
+        return -1L
+    }
+    var d = 0
+    var mo = 0
+    var y = 0
+    var hmPart = ""
+    var offPart = ""
+    for (var p in clean) {
+        var t = p
+        if (t.endsWith(",")) {
+            t = t.substring(0, t.length - 1)
+        }
+        if (t.length == 10 && t.charAt(4) == 45) {
+            // a nested ISO date, bail out to the ISO branch
+            return planParseWhen(t)
+        }
+        if (planDigits(t) && t.length <= 2) {
+            d = toIntStr(t)
+            continue
+        }
+        var mm = planMonthOf(t)
+        if (mm > 0 && t.length >= 3) {
+            mo = mm
+            continue
+        }
+        if (planDigits(t) && t.length == 4) {
+            y = toIntStr(t)
+            continue
+        }
+        if (t.indexOf(":") > 0) {
+            hmPart = t
+            continue
+        }
+        if (t.startsWith("+") || t.startsWith("-")) {
+            offPart = t
+        }
+    }
+    if (d == 0 || mo == 0 || y == 0 || hmPart == "") {
+        return -1L
+    }
+    var hm = hmPart.split(":")
+    if (hm.length < 2 || !planDigits(hm[0]) || !planDigits(hm[1])) {
+        return -1L
+    }
+    var off2 = planOffsetOf(offPart)
+    return utcMsOf(y, mo, d, toIntStr(hm[0]) * 60 + toIntStr(hm[1])) - ((off2 as Long) * 3600000L)
+}
+
+// Age in hours of an external date; -1 when the date is not recognisable.
+Int planAgeHours(String raw) {
+    var ms = planParseWhen(raw)
+    if (ms < 0L) {
+        return -1
+    }
+    var delta = time.now() - ms
+    if (delta < 0L) {
+        return 0
+    }
+    return (delta / 3600000L) as Int
+}
+
+// ---- the four functions ----
+
+List<String> planFunctions() {
+    var f = listOf<String>()
+    f.add("projetos")
+    f.add("noticias")
+    f.add("contraponto")
+    f.add("observacao")
+    return f
+}
+
+Bool validPlanFunction(String f) {
+    for (var x in planFunctions()) {
+        if (x == f) {
+            return true
+        }
+    }
+    return false
+}
+
+// Clock default, used when a profile does not declare `function:`. Matches the
+// mapping the profile documents: manha projetos, meio-dia noticias, tarde
+// contraponto, noite observacao.
+String defaultPlanFunction(String clock) {
+    if (clock == "06:00") {
+        return "projetos"
+    }
+    if (clock == "12:00") {
+        return "noticias"
+    }
+    if (clock == "15:00") {
+        return "contraponto"
+    }
+    if (clock == "18:00") {
+        return "observacao"
+    }
+    return "observacao"
+}
+
+// Human label of a function, for the report.
+String planFunctionLabel(String f) {
+    if (f == "projetos") {
+        return "trabalho real e projetos"
+    }
+    if (f == "noticias") {
+        return "noticia de tecnologia"
+    }
+    if (f == "contraponto") {
+        return "contraponto tecnico (anti-hype)"
+    }
+    return "observacao, humor e reflexao"
+}
+
+// ---- candidates ----
+
+record PlanCandidate(
+    String function,
+    String theme,
+    String argument,
+    String topic_key,
+    String evidence,
+    List<String> source_urls,
+    Int score,
+    List<String> score_notes,
+    // provenance of the raw material: "repo" | "research" | "profile"
+    String origin,
+    // the source's own publication date and this run's consultation date
+    String published_at,
+    String fetched_at,
+    // the concrete artifact behind it: a repo full_name, a source URL, or a
+    // profile path. This is what the generator is handed as sourced material.
+    // Appended LAST so the positional constructor arguments above stay in
+    // place.
+    String origin_ref)
+
+record PlanChoice(
+    String function,
+    String category_name,
+    String clock,
+    String label,
+    String angle,
+    Bool chosen,
+    PlanCandidate candidate,
+    String skip_reason)
+
+record PlanSet(List<PlanChoice> choices, List<String> notes)
+
+PlanCandidate emptyCandidate() {
+    return PlanCandidate("", "", "", "", "", listOf<String>(), 0, listOf<String>(), "", "", "", "")
+}
+
+// A repo that actually moved. The evidence is what the analysis STORED — the
+// digest is documentation and the flags say what was executed here, so the
+// candidate never claims more than that.
+PlanCandidate candidateFromRepo(RepoState r) {
+    var theme = "atualizacao no projeto " + r.full_name()
+    var arg = ""
+    if (r.description() != "") {
+        arg = r.description()
+    } else {
+        arg = "o que mudou em " + r.full_name()
+    }
+    var notes = listOf<String>()
+    var ev = "repo " + r.full_name()
+    if (r.url() != "") {
+        ev = ev + " (" + r.url() + ")"
+    }
+    if (r.language() != "") {
+        ev = ev + " lang=" + r.language()
+    }
+    ev = ev + " pushed_at=" + r.pushed_at() + " analisado_em=" + r.analyzed_at()
+    if (r.verified_build() || r.verified_tests()) {
+        ev = ev + " verificado_aqui=build:" + boolWord(r.verified_build()) + ",testes:" + boolWord(r.verified_tests())
+    } else {
+        ev = ev + " verificado_aqui=nao (nada foi executado aqui)"
+    }
+    var urls = listOf<String>()
+    if (r.url() != "") {
+        urls.add(r.url())
+    }
+    return PlanCandidate("projetos", theme, arg, strings.slugify(theme), ev, urls, 0, notes, "repo", r.pushed_at(), "", r.full_name())
+}
+
+String boolWord(Bool b) {
+    if (b) {
+        return "sim"
+    }
+    return "nao"
+}
+
+// A story actually read from a source. The theme is the story; the argument is
+// left for the generation step to develop FROM the evidence, not asserted here.
+PlanCandidate candidateFromResearch(ResearchItem it) {
+    var ev = "fonte " + it.publisher() + " (" + it.source_type() + ") " + it.url() + " publicado_em=" + firstNonEmpty(it.published_at(), "(sem data)") + " consultado_em=" + it.fetched_at()
+    var urls = listOf<String>()
+    urls.add(it.url())
+    return PlanCandidate("noticias", it.title(), firstNonEmpty(it.summary(), it.title()), it.topic_key(), ev, urls, 0, listOf<String>(), "research", it.published_at(), it.fetched_at(), it.url())
+}
+
+// A registered opinion. This is the author's own material — the safest possible
+// basis for an opinionated post, because it is documented in the profile.
+PlanCandidate candidateFromOpinion(Company company, String op, Int idx, String function) {
+    var theme = strings.truncate(op, 120)
+    var ev = "opiniao registrada no perfil (" + company.path() + ") #" + idx
+    return PlanCandidate(function, theme, op, strings.slugify(theme), ev, listOf<String>(), 0, listOf<String>(), "profile", "", "", company.path())
+}
+
+// ---- scoring (four bounded components, printed in full) ----
+
+// Recency: how old is the underlying material. A date we could not read scores
+// 0 AND says so — it is never silently treated as fresh.
+Int scoreRecency(String publishedAt, List<String> notes) {
+    var age = planAgeHours(publishedAt)
+    if (age < 0) {
+        notes.add("atualidade=0 (data nao reconhecida: '" + strings.truncate(publishedAt, 40) + "')")
+        return 0
+    }
+    if (age <= 24) {
+        notes.add("atualidade=30 (menos de 24h)")
+        return 30
+    }
+    if (age <= 168) {
+        notes.add("atualidade=20 (" + (age / 24) + " dias)")
+        return 20
+    }
+    if (age <= 720) {
+        notes.add("atualidade=10 (" + (age / 24) + " dias)")
+        return 10
+    }
+    notes.add("atualidade=0 (" + (age / 24) + " dias — antigo demais para passar como novidade)")
+    return 0
+}
+
+// Evidence: is there a concrete, checkable artifact behind this?
+Int scoreEvidence(PlanCandidate c, List<String> notes) {
+    if (c.origin() == "repo" && c.source_urls().size() > 0) {
+        notes.add("evidencia=30 (repositorio real com analise persistida)")
+        return 30
+    }
+    if (c.origin() == "research" && c.source_urls().size() > 0) {
+        notes.add("evidencia=25 (fonte externa com URL)")
+        return 25
+    }
+    if (c.origin() == "profile") {
+        notes.add("evidencia=15 (opiniao registrada no perfil, sem fonte externa)")
+        return 15
+    }
+    notes.add("evidencia=0 (nenhum artefato verificavel)")
+    return 0
+}
+
+// Relevance: does the material sit inside the profile's declared topics?
+// Two passes. The first looks for a whole declared topic inside the material.
+// The second looks for a SIGNIFICANT WORD of a declared topic ("jvm",
+// "compiladores", "arquitetura") — without it, a story titled "...compila para
+// JVM..." would score zero against the topic "Java e o ecossistema JVM" simply
+// because the topic is phrased as a longer phrase. Short connectives are
+// ignored so "e" or "de" cannot manufacture a match.
+Int scoreRelevance(Company company, PlanCandidate c, List<String> notes) {
+    var hay = " " + foldForMemory(c.theme() + " " + c.argument()).trim() + " "
+    var hits = 0
+    for (var t in company.topics()) {
+        var needle = foldForMemory(t).trim()
+        if (needle != "" && hay.indexOf(needle) >= 0) {
+            hits = hits + 1
+        }
+    }
+    if (hits == 0) {
+        for (var t in company.topics()) {
+            for (var w in foldForMemory(t).split(" ")) {
+                if (w.length < 3 || planStopWord(w)) {
+                    continue
+                }
+                if (hay.indexOf(" " + w) >= 0) {
+                    hits = hits + 1
+                    break
+                }
+            }
+        }
+    }
+    var s = math.min(hits * 10, 20)
+    // A registered opinion is inside the author's editorial scope by
+    // construction, so it keeps a floor even when its wording does not contain
+    // a declared topic word. This is stated, not hidden.
+    if (s == 0 && c.origin() == "profile") {
+        s = 10
+        notes.add("relevancia=10 (opiniao registrada no perfil: dentro do escopo editorial por definicao)")
+        return s
+    }
+    notes.add("relevancia=" + s + " (" + hits + " topico(s) do perfil no material)")
+    return s
+}
+
+// Connectives that must never count as a topical match on their own.
+Bool planStopWord(String w) {
+    var stop = listOf<String>()
+    stop.add("de")
+    stop.add("da")
+    stop.add("do")
+    stop.add("dos")
+    stop.add("das")
+    stop.add("que")
+    stop.add("com")
+    stop.add("por")
+    stop.add("para")
+    stop.add("sobre")
+    stop.add("uma")
+    stop.add("the")
+    stop.add("and")
+    for (var s in stop) {
+        if (s == w) {
+            return true
+        }
+    }
+    return false
+}
+
+// Originality: penalize material that repeats what was recently planned or
+// published. Lexical, like the rest of the memory layer, and its gap is the
+// same documented one (a reworded thesis is not caught).
+Int scoreOriginality(PlanCandidate c, List<String> recentThemes, List<String> notes) {
+    var worst = 0
+    for (var r in recentThemes) {
+        var ov = gramOverlapPercent(c.theme() + " " + c.argument(), r, 3)
+        if (ov > worst) {
+            worst = ov
+        }
+    }
+    if (worst >= 55) {
+        notes.add("originalidade=0 (sobreposicao " + worst + "% com pauta recente)")
+        return 0
+    }
+    if (worst >= 30) {
+        notes.add("originalidade=8 (sobreposicao " + worst + "% com pauta recente)")
+        return 8
+    }
+    notes.add("originalidade=20 (sem sobreposicao relevante com o historico)")
+    return 20
+}
+
+PlanCandidate scoreCandidate(Company company, PlanCandidate c, List<String> recentThemes) {
+    var notes = listOf<String>()
+    var total = 0
+    total = total + scoreRecency(c.published_at(), notes)
+    total = total + scoreEvidence(c, notes)
+    total = total + scoreRelevance(company, c, notes)
+    total = total + scoreOriginality(c, recentThemes, notes)
+    return PlanCandidate(c.function(), c.theme(), c.argument(), c.topic_key(), c.evidence(), c.source_urls(), total, notes, c.origin(), c.published_at(), c.fetched_at(), c.origin_ref())
+}
+
+// ---- gathering ----
+
+// Repos that moved recently enough to be worth a "what I built" post. A repo
+// whose analysis failed is skipped: there is no evidence to stand on.
+List<PlanCandidate> planRepoCandidates(Store store, Int maxAgeDays) {
+    var out = listOf<PlanCandidate>()
+    for (var r in store.allRepoStates()) {
+        if (r.digest() == "" || r.last_error() != "") {
+            continue
+        }
+        var age = planAgeHours(r.pushed_at())
+        if (age >= 0 && maxAgeDays > 0 && age > maxAgeDays * 24) {
+            continue
+        }
+        out.add(candidateFromRepo(r))
+    }
+    return out
+}
+
+List<PlanCandidate> planResearchCandidates(ResearchRun run, Int maxAgeHours) {
+    var out = listOf<PlanCandidate>()
+    for (var it in run.items()) {
+        var age = planAgeHours(it.published_at())
+        // A story with an unreadable date is kept (the report shows it), but a
+        // story that is provably older than the window is dropped: news that is
+        // not current is not news.
+        if (maxAgeHours > 0 && age >= 0 && age > maxAgeHours) {
+            continue
+        }
+        out.add(candidateFromResearch(it))
+    }
+    return out
+}
+
+List<PlanCandidate> planOpinionCandidates(Company company, String function) {
+    var out = listOf<PlanCandidate>()
+    var i = 1
+    // The observation slot draws on a DIFFERENT registered list than the
+    // contraponto slot. Both used to read `opinions`, and the profile has
+    // several about AI, so 15:00 and 18:00 kept taking two AI positions and
+    // produced two posts arguing the same thesis (measured 2026-10-11, and the
+    // lexical memory cannot see it: the two drafts shared 0% of their 4-grams).
+    // What she REFUSES is observation material by nature and it is a separate
+    // list, so drawing it here makes the two slots different by construction
+    // rather than by a similarity threshold that cannot work.
+    if (function == "observacao" && company.rejects().size() > 0) {
+        for (var rj in company.rejects()) {
+            out.add(candidateFromReject(company, rj, i, function))
+            i = i + 1
+        }
+        return out
+    }
+    for (var op in company.opinions()) {
+        out.add(candidateFromOpinion(company, op, i, function))
+        i = i + 1
+    }
+    return out
+}
+
+// A refusal the author registered about writing and engineering. It is the
+// observation slot's material: something she sees done and will not do.
+PlanCandidate candidateFromReject(Company company, String reject, Int idx, String function) {
+    var theme = strings.truncate(reject, 120)
+    var arg = "observacao sobre um padrao que a autora recusa: " + reject
+    var ev = "recusa registrada no perfil (" + company.path() + ") #" + idx
+    return PlanCandidate(function, theme, arg, strings.slugify("rej-" + theme), ev, listOf<String>(), 0, listOf<String>(), "profile", "", "", company.path() + "#rejects")
+}
+
+// ---- selection ----
+
+PlanCandidate bestOf(List<PlanCandidate> scored) {
+    var best = emptyCandidate()
+    for (var c in scored) {
+        if (c.score() > best.score()) {
+            best = c
+        }
+    }
+    return best
+}
+
+// Build the plan: one choice per slot, in slot order. Slots that cannot be
+// filled honestly come back with chosen=false and a reason.
+PlanSet buildPlan(Company company, Store store, ResearchRun research, Int repoMaxAgeDays, List<String> recentThemes) {
+    var notes = listOf<String>()
+    // repoMaxAgeDays == 0 means NO age limit (every analysed repo is a
+    // candidate); a positive value narrows it to repos that moved recently.
+    var repoCands = planRepoCandidates(store, repoMaxAgeDays)
+    var newsCands = planResearchCandidates(research, company.researchMaxAgeHours())
+
+    // score once per origin; the opinion pool is scored per slot because the
+    // function differs
+    var repoScored = listOf<PlanCandidate>()
+    for (var c in repoCands) {
+        repoScored.add(scoreCandidate(company, c, recentThemes))
+    }
+    var newsScored = listOf<PlanCandidate>()
+    for (var c in newsCands) {
+        newsScored.add(scoreCandidate(company, c, recentThemes))
+    }
+
+    notes.add("candidatos: " + repoScored.size() + " de projeto(s), " + newsScored.size() + " de noticia(s)")
+
+    var choices = listOf<PlanChoice>()
+    var usedKeys = listOf<String>()
+    // Themes already spoken for: the history first, then each pick as it is
+    // made, so later slots see earlier picks as repetition.
+    var runThemes = listOf<String>()
+    for (var rt in recentThemes) {
+        runThemes.add(rt)
+    }
+    for (var cat in company.categories()) {
+        var job = cat.function()
+        var pool = listOf<PlanCandidate>()
+        if (job == "projetos") {
+            pool = repoScored
+        } else {
+            if (job == "noticias") {
+                pool = newsScored
+            } else {
+                if (job == "contraponto") {
+                    // the author's own opinion is the spine; a current story may
+                    // be attached as the thing to push against
+                    pool = planOpinionCandidates(company, job)
+                } else {
+                    pool = planOpinionCandidates(company, job)
+                }
+            }
+        }
+        var scored = listOf<PlanCandidate>()
+        for (var c in pool) {
+            // Score against the history AND against what earlier slots in THIS
+            // run already took. Without the second part, two opinion slots can
+            // pick two opinions that share a thesis (the profile has several
+            // about AI) and produce two posts arguing the same thing — which is
+            // exactly what "cada horario puxa um angulo diferente" forbids.
+            var s = scoreCandidate(company, c, runThemes)
+            var taken = false
+            for (var k in usedKeys) {
+                if (k == s.topic_key()) {
+                    taken = true
+                }
+            }
+            if (!taken) {
+                scored.add(s)
+            }
+        }
+        if (scored.size() == 0) {
+            var why = "sem candidato para a funcao '" + job + "'"
+            if (job == "projetos" && repoScored.size() == 0) {
+                why = "nenhum projeto com atividade recente analisada (rode 'publisher github' ou o repo nao mudou)"
+            }
+            if (job == "noticias" && newsScored.size() == 0) {
+                if (research.failures() > 0 && research.items().size() == 0) {
+                    why = "nenhuma fonte respondeu (" + research.failures() + " falha(s)) — sem noticia verificavel, nada inventado"
+                } else {
+                    why = "nenhuma noticia dentro da janela de atualidade configurada"
+                }
+            }
+            choices.add(PlanChoice(job, cat.name(), cat.clock(), cat.label(), cat.angle(), false, emptyCandidate(), why))
+            continue
+        }
+        var best = bestOf(scored)
+        usedKeys.add(best.topic_key())
+        runThemes.add(best.theme() + " " + best.argument())
+        choices.add(PlanChoice(job, cat.name(), cat.clock(), cat.label(), cat.angle(), true, best, ""))
+    }
+    return PlanSet(choices, notes)
+}
+

@@ -1,0 +1,234 @@
+
+import java.lang.System
+
+// Service — start / stop / status for the recurring publisher daemon.
+//
+// Reuses the EXISTING daemon (`publisherMain(["daemon", ...])` -> Scheduler
+// .runForever, with its occurrence ledger and STOP file). This file adds only
+// the operational wrapper a human needs:
+//
+//   start  -> launch the daemon DETACHED (setsid, new session) so it survives
+//             the terminal; the daemon writes its OWN pid (via `sh -c 'echo
+//             $PPID'`, the only reliable way to read the JVM pid here — the
+//             ProcessHandle/ManagementFactory interop paths trip a codegen
+//             bug, see docs/gaps-and-reports.md BUG-13). No duplicate: a live
+//             pid is refused.
+//   stop   -> graceful: write the STOP file the daemon already honors, wait,
+//             then SIGTERM the EXACT pid (never `killall`). Never destroys the
+//             store/queue.
+//   status -> service state AND editorial state (next slot, review/approved/
+//             scheduled counts, last run, last error, heartbeat age). "Service
+//             up" and "authorized to publish" are DIFFERENT facts.
+//
+// A PID file alone is NOT proof of life (stale pids happen): every check
+// validates the process is alive AND is OUR daemon (its /proc cmdline mentions
+// the publisher daemon), so a reused pid is never killed by mistake.
+
+String servicePidPath() {
+    return defaultPublisherHome() + "/publisher.pid"
+}
+
+String serviceLogPath() {
+    return defaultPublisherHome() + "/publisher.log"
+}
+
+String serviceHeartbeatPath() {
+    return defaultPublisherHome() + "/publisher.heartbeat"
+}
+
+String serviceLockPath() {
+    return defaultPublisherHome() + "/publisher.start.lock"
+}
+
+// Atomic start lock (AUDIT FIX AUD-4): two `start` calls that race both read
+// the pid file before the daemon writes it, so both launch and two daemons end
+// up running. `mkdir` is atomic on POSIX — it succeeds for exactly one caller
+// and fails with EEXIST for the other. The lock is STALE-SAFE: if it is older
+// than the start window (60s) it is broken, so a crashed start never blocks
+// future ones.
+//
+// NOTE: written with a single return value on purpose — an early `return true`
+// plus a trailing `return false` trips the JVM backend's frame computation in
+// 0.5.0-beta (same family as BUG-13), so the result is accumulated in `held`.
+// Atomic start lock (AUDIT FIX AUD-4): two `start` calls that race both read
+// the pid file before the daemon writes it, so both launch and two daemons end
+// up running. `mkdir` is atomic on POSIX — it succeeds for exactly one caller
+// and fails for the other. The lock is STALE-SAFE: older than 60s is broken, so
+// a crashed start never blocks future ones.
+//
+// The whole decision runs in `sh` and returns the word LOCKED or BUSY: a bool
+// local built from a comparison trips the JVM backend's frame computation in
+// 0.5.0-beta (same family as BUG-13), so the result is a string to compare.
+String acquireStartLock() {
+    Directory(defaultPublisherHome()).createDirectories()
+    var lock = serviceLockPath()
+    var script = "L='" + lock + "'; if [ -d \"$L\" ] && [ $(( $(date +%s) - $(stat -c %Y \"$L\") )) -gt 60 ]; then rmdir \"$L\" 2>/dev/null; fi; "
+    script = script + "if mkdir \"$L\" 2>/dev/null; then echo LOCKED; else echo BUSY; fi"
+    var r = process.run("sh", "-c", script)
+    return r.stdout.trim()
+}
+
+Int releaseStartLock() {
+    process.run("rmdir", serviceLockPath())
+    return 0
+}
+
+String serviceJavaBin() {
+    return System.getProperty("java.home") + "/bin/java"
+}
+
+String serviceClasspath() {
+    return System.getProperty("java.class.path")
+}
+
+// Single-quote a value for `sh -c`. Paths come from config/CLI (the operator's
+// own machine), but quoting keeps a path with spaces or a stray quote from
+// changing the command shape.
+String shQuote(String s) {
+    var out = "'"
+    var i = 0
+    while (i < s.length) {
+        var c = s.charAt(i)
+        if (c == 39) {
+            out = out + "'\\''"
+        } else {
+            out = out + s.substring(i, i + 1)
+        }
+        i = i + 1
+    }
+    return out + "'"
+}
+
+// PID of THIS process: a child `sh` reports its parent ($PPID = the JVM).
+Int selfPid() {
+    var r = process.run("sh", "-c", "echo $PPID")
+    if (r.exitCode != 0) {
+        return 0
+    }
+    var t = r.stdout.trim()
+    if (!strings.isNumeric(t)) {
+        return 0
+    }
+    return toIntStr(t)
+}
+
+Int readPidFile() {
+    var raw = File(servicePidPath()).readText()
+    if (raw == null) {
+        return 0
+    }
+    var t = raw.trim()
+    if (!strings.isNumeric(t)) {
+        return 0
+    }
+    return toIntStr(t)
+}
+
+Bool pidAlive(Int pid) {
+    if (pid <= 0) {
+        return false
+    }
+    return process.run("kill", "-0", "" + pid).exitCode == 0
+}
+
+// Is the live process actually OUR publisher daemon? Guards against a stale
+// pid file whose number was recycled by an unrelated process.
+Bool pidIsPublisher(Int pid) {
+    var raw = File("/proc/" + pid + "/cmdline").readText()
+    if (raw == null) {
+        return false
+    }
+    return raw.indexOf("Default.Main") >= 0 && raw.indexOf("daemon") >= 0
+}
+
+String heartbeatAgeLabel() {
+    var raw0 = File(serviceHeartbeatPath()).readText()
+    if (raw0 == null) {
+        return ""
+    }
+    var t = raw0.trim()
+    if (t == "") {
+        return ""
+    }
+    if (!strings.isNumeric(t)) {
+        return ""
+    }
+    var age = (time.now() - math.parseLongOrDefault(t, 0L)) / 1000L
+    if (age < 0) {
+        age = 0
+    }
+    return "" + age + "s atras"
+}
+
+// ---- daemon-side: identity written by the running process ----
+
+Int daemonWritePid() {
+    var d = Directory(defaultPublisherHome())
+    d.createDirectories()
+    var pid = selfPid()
+    if (pid <= 0) {
+        log.warn("service: nao consegui descobrir o proprio pid — pid file nao gravado")
+        return 0
+    }
+    File(servicePidPath()).writeText("" + pid + "\n")
+    daemonHeartbeat()
+    return pid
+}
+
+// Heartbeat is an EPOCH-ms stamp: no timezone assumption, just liveness.
+Int daemonHeartbeat() {
+    File(serviceHeartbeatPath()).writeText("" + time.now() + "\n")
+    return 0
+}
+
+Int daemonCleanupPid() {
+    File(servicePidPath()).delete()
+    return 0
+}
+
+// ---- status record ----
+
+record ServiceStatus(
+    Bool active,
+    Int pid,
+    Bool stale,
+    String heartbeatAge,
+    String nextSlot,
+    Int reviewCount,
+    Int approvedCount,
+    Int scheduledCount,
+    String lastOccurrence,
+    String lastError)
+
+ServiceStatus computeStatus(Store store, Company company) {
+    var pid = readPidFile()
+    var active = pid > 0 && pidAlive(pid) && pidIsPublisher(pid)
+    var stale = pid > 0 && !active
+    var nextSlot = ""
+    var sched = Scheduler(store, company)
+    var bestMs = 999999999999999L
+    for (var s in store.activeSchedules()) {
+        if (s.next_execution() == "") {
+            continue
+        }
+        var ms = sched.millisUntil(s.next_execution())
+        if (ms > 0 && ms < bestMs) {
+            bestMs = ms
+            nextSlot = s.next_execution()
+        }
+    }
+    var review = store.publicationsByStatus(statusReview()).size()
+    var approved = store.publicationsByStatus(statusApproved()).size()
+    var scheduled = store.publicationsByStatus(statusScheduled()).size()
+    var lastOcc = ""
+    var lastErr = ""
+    var occs = store.allOccurrences()
+    if (occs.size() > 0) {
+        var o = occs.get(occs.size() - 1)
+        lastOcc = o.recurrence_id() + " @ " + o.occurrence_time() + " -> " + o.result()
+        if (o.detail() != "") {
+            lastErr = o.detail()
+        }
+    }
+    return ServiceStatus(active, pid, stale, heartbeatAgeLabel(), nextSlot, review, approved, scheduled, lastOcc, lastErr)
+}

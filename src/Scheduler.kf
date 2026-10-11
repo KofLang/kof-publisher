@@ -188,11 +188,79 @@ class Scheduler {
             return ExecReport(key, "", "skipped", "already claimed")
         }
         observability.increment("publisher.schedule.triggered", 1)
-        var recent = store.recentPublishedContents(8)
-        var topic = pickTopic(s, recent)
-        var ed = Editorial(company)
+        var recent = store.recentEditorialContents(8, "")
         var mode = effectiveMode(s)
         var target = targetName(s)
+        // The schedule's clock maps to an editorial category (personal profile
+        // 06/12/15/18). No category declared -> the generic path, exactly the
+        // previous behaviour (KofLab is unaffected).
+        var catLabel = ""
+        var catAngle = ""
+        var cat = categoryAt(company.categories(), s.clock())
+        if (cat != null) {
+            var c2 = cat
+            catLabel = c2.label()
+            catAngle = c2.angle()
+        }
+        var topic = ""
+        var objective = ""
+        var ed = Editorial(company)
+        var isProfileSlot = cat != null
+        var chosen = PlanChoice("", "", "", "", "", false, emptyCandidate(), "")
+        var run = ResearchRun(listOf<ResearchItem>(), listOf<String>(), 0)
+        if (isProfileSlot) {
+            // EDITORIAL PROFILE — the SAME pipeline `plan` runs, executed at
+            // every clock. Without this the daemon would generate from the
+            // static profile alone: the news slot would never see a current
+            // source, and the pauta behind the draft would never be recorded,
+            // so a later cycle could not tell the topic had already been used.
+            //
+            // Research is best-effort and honest: a source that fails is logged
+            // and the slot is SKIPPED, never filled with an invented story.
+            var runR = researchRun(company.timezone(), company.researchSources(), listOf<String>(), "")
+            run = runR
+            for (var rn in run.notes()) {
+                log.info("pesquisa " + s.clock() + ": " + rn)
+            }
+            var plan = buildPlan(company, store, run, 0, store.recentTopicThemes(12))
+            var found = false
+            for (var pc in plan.choices()) {
+                if (pc.clock() == s.clock()) {
+                    chosen = pc
+                    found = true
+                }
+            }
+            if (!found) {
+                var whyNoSlot = "nenhuma pauta para o horario " + s.clock() + " no plano"
+                store.updateOccurrence(Occurrence(key, s.name(), occIso, "", "planning", "skipped", whyNoSlot, started, nowStamp()))
+                observability.increment("publisher.content.skipped", 1)
+                log.info("ocorrencia " + key + ": " + whyNoSlot)
+                return ExecReport(key, "", "skipped", whyNoSlot)
+            }
+            if (!chosen.chosen()) {
+                var whySkip = chosen.skip_reason()
+                store.updateOccurrence(Occurrence(key, s.name(), occIso, "", "planning", "skipped", whySkip, started, nowStamp()))
+                observability.increment("publisher.content.skipped", 1)
+                log.info("ocorrencia " + key + ": SKIP — " + whySkip)
+                return ExecReport(key, "", "skipped", whySkip)
+            }
+            var cand = chosen.candidate()
+            topic = cand.theme()
+            objective = planObjective(chosen)
+            var block = planEvidenceBlock(store, chosen, run)
+            if (block != "") {
+                ed = ed.withExtra(block)
+            }
+        } else {
+            topic = pickTopic(s, recent)
+            objective = "conteudo recorrente da agenda '" + s.name() + "'"
+            if (company.github().enabled()) {
+                var gh = githubDigest(store, company, 4)
+                if (gh != "") {
+                    ed = ed.withExtra(gh)
+                }
+            }
+        }
         var pubId = "pub-" + strings.slugify(key)
         var existingPub = store.byOccurrenceKey(key)
         var content = ""
@@ -206,9 +274,13 @@ class Scheduler {
             while (round < 3) {
                 var draft = ""
                 try {
-                    draft = ed.generate(topic, recent, "conteudo recorrente da agenda '" + s.name() + "'")
+                    draft = ed.generateIn(topic, recent, objective, catLabel, catAngle)
                 } catch (String e) {
-                    if (e.startsWith("LAB-SKIP")) {
+                    // LAB-SKIP = no lab news in the window; SKIP = no material
+                    // at all. Both mean "nothing honest to publish now" — the
+                    // occurrence is skipped, never fabricated, and the window
+                    // does NOT advance so the next run can cover it.
+                    if (e.startsWith("LAB-SKIP") || e.startsWith("SKIP")) {
                         store.updateOccurrence(Occurrence(key, s.name(), occIso, "", "generation", "skipped", e, started, nowStamp()))
                         observability.increment("publisher.content.skipped", 1)
                         log.info("ocorrencia " + key + ": " + e + " (janela NAO avanca — amanha tenta de novo)")
@@ -221,7 +293,7 @@ class Scheduler {
                     content = draft
                     break
                 }
-                draft = ed.revise(draft, v, recent)
+                draft = ed.reviseIn(draft, v, recent, catLabel, catAngle)
                 var v2 = ed.validate(draft, recent)
                 if (v2.ok()) {
                     content = draft
@@ -239,12 +311,36 @@ class Scheduler {
             }
             observability.increment("publisher.content.generated", 1)
             observability.increment("publisher.content.validated", 1)
+            // The pauta behind the draft is recorded BEFORE the draft itself,
+            // exactly as `plan` does: the next cycle then sees the topic as
+            // already used, and the draft can point at the sources that
+            // grounded it.
+            var topicId = ""
+            if (isProfileSlot) {
+                topicId = persistPlanTopic(store, company, chosen, pubId, run, nowStamp())
+                var srcs = store.sourcesByTopic(topicId)
+                var cnd = chosen.candidate()
+                var fc = ed.validateFactual(content, srcs, cnd.origin(), cnd.published_at(), cnd.evidence())
+                if (!fc.ok()) {
+                    // Editorial quality passed but the mechanical factual proxy
+                    // did not. The draft is KEPT in REVIEW carrying the caveat
+                    // — never approved, never published — so the problem is
+                    // visible instead of silently swallowed.
+                    store.savePublication(Publication(pubId, company.name(), topic, content, statusReview(), nowStamp(), occIso, "", target, lmModel(), company.digest(), s.name(), "", "", key, 0, topicId))
+                    markTopicOutcome(store, topicId, "review-com-ressalva", joinList(fc.problems()))
+                    observability.increment("publisher.content.rejected", 1)
+                    log.warn("ocorrencia " + key + ": rascunho em REVIEW com ressalva factual: " + joinList(fc.problems()))
+                    store.updateOccurrence(Occurrence(key, s.name(), occIso, pubId, "review", "awaiting", "", started, ""))
+                    return ExecReport(key, pubId, "review", "factual: " + joinList(fc.problems()))
+                }
+                markTopicOutcome(store, topicId, "validado", "")
+            }
             store.updateOccurrence(Occurrence(key, s.name(), occIso, pubId, "generation", "success", "", started, ""))
             var status = statusApproved()
             if (mode == "assisted") {
                 status = statusReview()
             }
-            store.savePublication(Publication(pubId, company.name(), topic, content, status, nowStamp(), occIso, "", target, lmModel(), company.digest(), s.name(), "", "", key, 0))
+            store.savePublication(Publication(pubId, company.name(), topic, content, status, nowStamp(), occIso, "", target, lmModel(), company.digest(), s.name(), "", "", key, 0, topicId))
         }
         if (mode == "assisted") {
             store.updateOccurrence(Occurrence(key, s.name(), occIso, pubId, "review", "awaiting", "", started, ""))
@@ -282,11 +378,11 @@ class Scheduler {
         var delay = attemptDelayMs
         var lastError = ""
         while (attempt <= maxAttempts) {
-            store.savePublication(Publication(pubId, company1, topic, content, statusPublishing(), createdAt, occIso, "", targetName, lmModel(), ctx, schedName, "", "", key, attempt))
+            store.savePublication(Publication(pubId, company1, topic, content, statusPublishing(), createdAt, occIso, "", targetName, lmModel(), ctx, schedName, "", "", key, attempt, ""))
             observability.increment("publisher.publication.started", 1)
             try {
                 var out = target.publish(content)
-                store.savePublication(Publication(pubId, company1, topic, content, statusPublished(), createdAt, occIso, nowStamp(), targetName, lmModel(), ctx, schedName, out.externalId(), "", key, attempt))
+                store.savePublication(Publication(pubId, company1, topic, content, statusPublished(), createdAt, occIso, nowStamp(), targetName, lmModel(), ctx, schedName, out.externalId(), "", key, attempt, ""))
                 store.updateOccurrence(Occurrence(key, schedName, occIso, pubId, "publication", "success", out.externalId(), started, nowStamp()))
                 observability.increment("publisher.publication.completed", 1)
                 log.info("ocorrencia " + key + ": publicada -> " + out.externalId())
@@ -299,10 +395,25 @@ class Scheduler {
                     time.sleep(delay)
                     delay = delay * 2
                 }
+            } catch (Throwable e) {
+                // AUDIT FIX (AUD-9): only String failures were caught, so an
+                // Error thrown inside a target (measured: a JVM VerifyError from
+                // the 0.5.0-beta codegen on the LinkedIn publish path) escaped
+                // this loop entirely and left the publication in `publishing` —
+                // a state with NO exit: not publishable, not cancellable, not
+                // retryable. Recording it as `failed` keeps the state machine
+                // terminal and the content visible instead of stranded.
+                lastError = e.toString()
+                observability.increment("publisher.publication.failed", 1)
+                log.warn("ocorrencia " + key + ": tentativa " + attempt + "/" + maxAttempts + " falhou (erro interno): " + lastError)
+                if (attempt < maxAttempts) {
+                    time.sleep(delay)
+                    delay = delay * 2
+                }
             }
             attempt = attempt + 1
         }
-        store.savePublication(Publication(pubId, company1, topic, content, statusFailed(), createdAt, occIso, "", targetName, lmModel(), ctx, schedName, "", lastError, key, maxAttempts))
+        store.savePublication(Publication(pubId, company1, topic, content, statusFailed(), createdAt, occIso, "", targetName, lmModel(), ctx, schedName, "", lastError, key, maxAttempts, ""))
         store.updateOccurrence(Occurrence(key, schedName, occIso, pubId, "publication", "failed", lastError, started, nowStamp()))
         log.error("ocorrencia " + key + ": FAILED apos " + maxAttempts + " tentativas — " + lastError)
         return ExecReport(key, pubId, "failed", lastError)
@@ -344,13 +455,19 @@ class Scheduler {
     // ---- daemon loop ----
 
     Int runForever() {
+        // Fresh daemon identity: drop a leftover STOP (a previous stop must
+        // not instantly end a new start) and record our own pid + heartbeat.
+        File(publisherStopFile()).delete()
+        daemonWritePid()
         recoverAgenda()
         while (true) {
+            daemonHeartbeat()
             var active = store.activeSchedules()
             if (active.size() == 0) {
                 log.warn("daemon: nenhuma agenda ativa — use 'publisher schedule' (aguardando)")
                 time.sleep(5000)
                 if (publisherStopRequested()) {
+                    daemonCleanupPid()
                     return 0
                 }
                 continue
@@ -401,6 +518,7 @@ class Scheduler {
                     slept = slept + 200L
                     if (publisherStopRequested()) {
                         log.info("daemon: stop solicitado — encerrando limpo")
+                        daemonCleanupPid()
                         return 0
                     }
                 }

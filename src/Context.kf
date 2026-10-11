@@ -59,7 +59,85 @@ record Company(
     String sourceRepo,
     String sourceRef,
     List<String> guide,
-    String digest)
+    String digest,
+    List<String> opinions,
+    List<String> facts,
+    List<Category> categories,
+    List<String> diversity,
+    List<String> authenticity,
+    Int maxChars,
+    Bool requireMaterial,
+    List<String> principles,
+    List<String> sources,
+    GithubConfig github,
+    // Research + retention policy (# editorial). Appended at the end so the
+    // existing positional constructor call keeps its arguments in place.
+    List<String> researchSources,
+    Int researchMaxAgeHours,
+    Int retentionRecords,
+    Int retentionMaxGb,
+    // The OPERATIONAL side of the profile: how the author reasons, how she
+    // builds an argument, what she rejects, and the evidence ladder she
+    // insists on. These are what make the profile a set of working rules
+    // instead of a list of adjectives, and they are rendered into the
+    // generation prompt (see Editorial.contextBrief/materialBrief).
+    List<String> thinking,
+    List<String> argumentation,
+    List<String> rejects,
+    List<String> evidenceRules)
+
+// Explicit GitHub source config (# github section). The account is NEVER
+// guessed: it must be declared, because the org name is not the author's
+// personal account (acceptance §2.1).
+record GithubConfig(String account, List<String> orgs, List<String> include, Bool enabled)
+
+// One editorial category (a daily slot's ORIENTATION, not a hard template):
+//   # category morning
+//   clock: 06:00
+//   label: opiniao e reflexao
+//   function: contraponto
+//   angle: uma tese propria sobre tecnologia, mercado ou IA que renda discordancia
+// `clock` matches a schedule's `at` — that is how a slot finds its category.
+// The angle is guidance injected into the prompt, never a required structure
+// (acceptance: categories are flexible orientation, not four obligations).
+//
+// `function` names WHAT KIND of editorial job the slot does — one of
+// projetos | noticias | contraponto | observacao. It is what topic PLANNING
+// keys on: a news slot is fed from research items, a projects slot from real
+// repository activity, and so on. An unrecognised/absent value falls back to
+// the clock default, so an old profile keeps working unchanged.
+record Category(String name, String clock, String label, String angle, String function)
+
+// The category whose clock matches a schedule's `at` ("" -> none). Pure
+// lookup, no persistence: the personal profile maps 06/12/15/18 to four
+// categories without touching the Schedule entity/table.
+Category? categoryAt(List<Category> cats, String clock) {
+    for (var c in cats) {
+        if (c.clock() == clock) {
+            return c
+        }
+    }
+    return null
+}
+
+// Is there editorial material to ground a post? Facts/opinions/topics, or a
+// source repo (the KofLab facts flow). When a company declares
+// require_material and has none, generation must SKIP — never fabricate.
+Bool hasMaterial(Company c) {
+    if (c.sourceRepo() != "") {
+        return true
+    }
+    if (c.topics().size() > 0) {
+        return true
+    }
+    if (c.opinions().size() > 0) {
+        return true
+    }
+    if (c.facts().size() > 0) {
+        return true
+    }
+    return false
+}
 
 // Expand $VAR / ${VAR} in config values (KofMD stays user-portable:
 // `source_repo: $KOF_KOF4J_REPO` or a literal path both work). Unknown or
@@ -154,7 +232,7 @@ List<String> globalList(List<Section> secs, String key) {
         var i = 0
         while (i < s.lkeys().size()) {
             if (s.lkeys().get(i) == key) {
-                out = splitJoined(s.lvalues().get(i))
+                out = splitItems(s.lvalues().get(i))
             }
             i = i + 1
         }
@@ -186,7 +264,7 @@ List<String> sectionList(List<Section> secs, String secName, String key) {
         var i = 0
         while (i < s.lkeys().size()) {
             if (s.lkeys().get(i) == key) {
-                return splitJoined(s.lvalues().get(i))
+                return splitItems(s.lvalues().get(i))
             }
             i = i + 1
         }
@@ -260,7 +338,7 @@ class CompanySections {
                 }
                 if (fl.items().size() > 0) {
                     lkeys.add(fl.name())
-                    lvalues.add(joinedOf(fl.items()))
+                    lvalues.add(joinItems(fl.items()))
                 }
             }
         }
@@ -321,6 +399,48 @@ List<Schedule> schedulesOf(List<Section> secs, String defaultTz, String defaultM
     return out
 }
 
+// Editorial categories: sections named "# category <nome>" carrying clock
+// (HH:MM, required), label and angle. The clock is the JOIN KEY to a schedule.
+List<Category> categoriesOf(List<Section> secs) {
+    var out = listOf<Category>()
+    for (var s in secs) {
+        if (!s.name().startsWith("category")) {
+            continue
+        }
+        var name = "default"
+        var dash = s.name().indexOf("-")
+        if (dash >= 0) {
+            name = s.name().substring(dash + 1, s.name().length)
+        }
+        var clock = sectionField(secs, s.name(), "clock")
+        if (clock == "" || parseClock(clock) < 0) {
+            throw "category '" + name + "': campo 'clock' obrigatorio no formato HH:MM"
+        }
+        var job = sectionField(secs, s.name(), "function")
+        if (!validPlanFunction(job)) {
+            job = defaultPlanFunction(clock)
+        }
+        out.add(Category(name, clock, sectionField(secs, s.name(), "label"), sectionField(secs, s.name(), "angle"), job))
+    }
+    return out
+}
+
+// GitHub source config (# github section). The account is DECLARED, never
+// inferred: `account` is the author's PERSONAL login (evidence-verified
+// separately by `kof-publisher github`), `orgs` are organisations she
+// contributes to (separate identities, §2.1), `include` optionally narrows
+// the repo set. Absent section => disabled: no network, no digest.
+GithubConfig githubConfigOf(List<Section> secs) {
+    var account = sectionField(secs, "github", "account")
+    var orgs = sectionList(secs, "github", "orgs")
+    var include = sectionList(secs, "github", "include")
+    var enabled = sectionField(secs, "github", "enabled") == "true"
+    if (account == "" && orgs.size() == 0) {
+        enabled = false
+    }
+    return GithubConfig(account, orgs, include, enabled)
+}
+
 // Parse a company .md (KofMD) file into the editorial model. Honest String
 // errors on anything structural — no silent defaults for identity fields.
 Company loadCompany(String path) {
@@ -360,6 +480,36 @@ Company loadCompany(String path) {
         throw "company.kofmd: timezone '" + tz + "' unavailable on this runtime — refusing to assume UTC"
     }
     var target0 = firstNonEmpty(sectionField(secs, "publishing", "target"), globalField(secs, "target"))
+    // Editorial policy (# editorial): size limit, material gate, diversity
+    // strategy and authenticity rules — explicit, easy to maintain, no
+    // separate framework.
+    var maxChars = 0
+    var rawMax = sectionField(secs, "editorial", "max_chars")
+    if (rawMax != "" && strings.isNumeric(rawMax)) {
+        maxChars = toIntStr(rawMax)
+    }
+    var requireMaterial = sectionField(secs, "editorial", "require_material") == "true"
+    // Research policy: which sources to consult before choosing topics, and how
+    // old a story may be and still pass as current. `0` (or absent) means no
+    // explicit window — the age is still RECORDED and reported, never assumed.
+    var researchSources = sectionList(secs, "editorial", "research")
+    var researchMaxAgeHours = 0
+    var rawAge = sectionField(secs, "editorial", "research_max_age_hours")
+    if (rawAge != "" && strings.isNumeric(rawAge)) {
+        researchMaxAgeHours = toIntStr(rawAge)
+    }
+    // Retention: a record count (how many editorial records to keep) and a
+    // storage ceiling in GB (the safety valve, not a target).
+    var retentionRecords = 10000
+    var rawRet = sectionField(secs, "editorial", "retention_records")
+    if (rawRet != "" && strings.isNumeric(rawRet)) {
+        retentionRecords = toIntStr(rawRet)
+    }
+    var retentionMaxGb = 20
+    var rawGb = sectionField(secs, "editorial", "retention_max_gb")
+    if (rawGb != "" && strings.isNumeric(rawGb)) {
+        retentionMaxGb = toIntStr(rawGb)
+    }
     return Company(
         path,
         name,
@@ -380,7 +530,25 @@ Company loadCompany(String path) {
         expandVars(firstNonEmpty(sectionField(secs, "publishing", "source_repo"), globalField(secs, "source_repo"))),
         firstNonEmpty(sectionField(secs, "publishing", "source_ref"), globalField(secs, "source_ref")),
         globalList(secs, "guide"),
-        digestText(raw))
+        digestText(raw),
+        globalList(secs, "opinions"),
+        globalList(secs, "facts"),
+        categoriesOf(secs),
+        sectionList(secs, "editorial", "diversity"),
+        sectionList(secs, "editorial", "authenticity"),
+        maxChars,
+        requireMaterial,
+        globalList(secs, "principles"),
+        globalList(secs, "sources"),
+        githubConfigOf(secs),
+        researchSources,
+        researchMaxAgeHours,
+        retentionRecords,
+        retentionMaxGb,
+        globalList(secs, "thinking"),
+        globalList(secs, "argumentation"),
+        globalList(secs, "rejects"),
+        globalList(secs, "evidence"))
 }
 
 KofmdSchema? findSchema(List<KofmdSchema> schemas, String name) {

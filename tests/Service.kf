@@ -1,0 +1,218 @@
+// E2E: the operational CLI — start / stop / status (§3) against the REAL built
+// binary, in an ISOLATED home (KOF_PUBLISHER_HOME), so no test ever touches a
+// real daemon, a real queue or LinkedIn.
+//
+// Proven here:
+//   start launches a detached daemon that writes its OWN pid and heartbeats;
+//   start REFUSES to launch a second one (no duplicate);
+//   status separates "service up" from "authorized to publish";
+//   stop is graceful (STOP file, then TERM on the exact pid) and preserves the
+//   queue/state — stopping is not a wipe;
+//   a stale pid file is not mistaken for a live daemon.
+
+String envOr(String key, String dflt) {
+    var v = config.env(key)
+    if (v != null && v != "") {
+        return v
+    }
+    return dflt
+}
+
+String publisherDir() {
+    return envOr("KOF_PUBLISHER_DIR", "/home/mel/Documentos/kof-publisher")
+}
+
+String classpath() {
+    var home = envOr("HOME", "/home/mel")
+    var drv = envOr("KOF_SQLITE_JAR", home + "/.kof/deps/org/xerial/sqlite-jdbc/3.53.4.0/sqlite-jdbc-3.53.4.0.jar")
+    return envOr("KOF_PUBLISHER_CLASSES", publisherDir() + "/build/classes")
+        + ":" + home + "/.local/share/kof/lib/kof.jar:" + drv
+}
+
+String workDir(String name) {
+    return "/tmp/kof-pub-tests/" + name
+}
+
+String runCmd(String cmd) {
+    var r = process.run("sh", "-c", cmd + " 2>&1")
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+Int exitOf(String blob) {
+    var i = blob.indexOf("||EXIT=")
+    if (i < 0) {
+        throw "no exit marker"
+    }
+    return blob.substring(i + 7).toInt()
+}
+
+String outOf(String blob) {
+    var i = blob.indexOf("||EXIT=")
+    return blob.substring(0, i)
+}
+
+Bool has(String hay, String needle) {
+    return hay.indexOf(needle) >= 0
+}
+
+// A profile with a long-interval schedule (so the daemon never fires during the
+// test) and one pre-existing queued publication (to prove stop preserves it).
+String serviceCompany() {
+    var c = "# company\nname: Servico\n\n# topics\ntopics:\n  - engenharia\n\n"
+    c = c + "# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\ntarget: linkedin\n\n"
+    c = c + "# schedule nightly\nevery: 365\nat: 03:00\nmode: assisted\ntarget: linkedin\n"
+    return c
+}
+
+void prepare(String name) {
+    var r = process.run("sh", "-c", "rm -rf '" + workDir(name) + "' && mkdir -p '" + workDir(name) + "/home'")
+    assert(r.exitCode == 0, "prepare " + name + ": " + r.stderr)
+    File(workDir(name) + "/company.kofmd").writeText(serviceCompany())
+}
+
+String cli(String name, String args) {
+    // AUDIT FIX (AUD-7): bounded. `start` used to hang forever (the detached
+    // daemon kept the captured stdout pipe open); without a timeout a regression
+    // would hang the whole suite instead of failing one test. `timeout` turns
+    // "never returns" into exit 124, which the assertions can see.
+    var cmd = "cd '" + workDir(name) + "' && KOF_PUBLISHER_HOME='" + workDir(name) + "/home'"
+        + " timeout 60 java -cp '" + classpath() + "' Default.Main " + args + " 2>&1"
+    var r = process.run("sh", "-c", cmd)
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+// Never leave a daemon behind, whatever the assertions do.
+void forceCleanup(String name) {
+    runCmd("if [ -f '" + workDir(name) + "/home/publisher.pid' ]; then kill -TERM $(cat '" + workDir(name) + "/home/publisher.pid') 2>/dev/null || true; fi; true")
+    runCmd("sleep 1")
+}
+
+test "service: start launches a detached daemon, refuses a duplicate, status is honest, stop is graceful" {
+    prepare("svc-life")
+    var s = cli("svc-life", "start --company company.kofmd --store pub.db")
+    assert(exitOf(s) == 0, s)
+    assert(has(outOf(s), "publisher iniciado"), s)
+
+    var pidFile = runCmd("cat '" + workDir("svc-life") + "/home/publisher.pid'")
+    var pid = outOf(pidFile).trim()
+    assert(exitOf(pidFile) == 0 && pid != "", "no pid file: " + pidFile)
+
+    // liveness: the pid is alive and is OUR daemon (not a recycled number)
+    var alive = runCmd("kill -0 " + pid + " && echo ALIVE || echo DEAD")
+    assert(has(outOf(alive), "ALIVE"), alive)
+    var cmdline = runCmd("tr '\\0' ' ' < /proc/" + pid + "/cmdline")
+    assert(has(outOf(cmdline), "Default.Main"), cmdline)
+    assert(has(outOf(cmdline), "daemon"), cmdline)
+
+    // heartbeat file was written by the daemon
+    var hb = runCmd("test -s '" + workDir("svc-life") + "/home/publisher.heartbeat' && echo HB || echo NOHB")
+    assert(has(outOf(hb), "HB"), hb)
+
+    // status: service up, but publishing is still ASSISTED (two separate facts)
+    var st = cli("svc-life", "status --company company.kofmd --store pub.db")
+    assert(exitOf(st) == 0, st)
+    var so = outOf(st)
+    assert(has(so, "service      : ATIVO"), so)
+    assert(has(so, "publicacao   : ASSISTIDA"), so)
+    assert(has(so, "proximo slot"), so)
+
+    // NO DUPLICATE: a second start refuses instead of launching another daemon
+    var s2 = cli("svc-life", "start --company company.kofmd --store pub.db")
+    assert(exitOf(s2) == 0, s2)
+    assert(has(outOf(s2), "ja ativo"), s2)
+    // count daemons whose working dir is THIS test's dir (the daemon's argv is
+    // relative, so /proc/<pid>/cwd is what identifies it)
+    // count the DAEMON JVMs whose working dir is THIS test's dir. A pid's argv
+    // is relative and the `sh` wrapper shares the cwd, so we match on the
+    // executable being java; 'daemo[n]' keeps this shell from matching itself.
+    var count = runCmd("for p in $(pgrep -f 'Default.Main daemo[n]'); do echo $(readlink /proc/$p/cwd) $(readlink /proc/$p/exe); done | grep -c '^" + workDir("svc-life") + " .*java$'")
+    assert(exitOf(count) == 0 && outOf(count).trim() == "1", "expected exactly one daemon, got:\n" + count)
+    // and the pid file still names the SAME process (start did not replace it)
+    var pidFile2 = runCmd("cat '" + workDir("svc-life") + "/home/publisher.pid'")
+    assert(outOf(pidFile2).trim() == pid, "pid changed on refused start:\n" + pidFile2)
+
+    // graceful stop
+    var stop = cli("svc-life", "stop")
+    assert(exitOf(stop) == 0, stop)
+    assert(has(outOf(stop), "publisher parado"), stop)
+    var dead = runCmd("kill -0 " + pid + " 2>/dev/null && echo ALIVE || echo DEAD")
+    assert(has(outOf(dead), "DEAD"), dead)
+
+    // status now reports stopped
+    var st2 = cli("svc-life", "status --company company.kofmd --store pub.db")
+    assert(has(outOf(st2), "service      : parado"), st2)
+    forceCleanup("svc-life")
+}
+
+test "service: stop preserves the queue and state; a stale pid file is not a live daemon" {
+    prepare("svc-state")
+    // seed the queue through the real CLI: a schedule + a review proposal
+    var sync = cli("svc-state", "sync --company company.kofmd --store pub.db")
+    assert(exitOf(sync) == 0, sync)
+
+    var s = cli("svc-state", "start --company company.kofmd --store pub.db")
+    assert(exitOf(s) == 0, s)
+    var stop = cli("svc-state", "stop")
+    assert(exitOf(stop) == 0, stop)
+
+    // the schedule survived the stop (state was preserved, not wiped)
+    var scheds = cli("svc-state", "schedules --store pub.db")
+    assert(exitOf(scheds) == 0, scheds)
+    assert(has(outOf(scheds), "nightly"), scheds)
+
+    // a pid file pointing at a dead pid must be reported as stale, never as
+    // "active" — and start must clean it up rather than refuse.
+    var junk = runCmd("echo 999999 > '" + workDir("svc-state") + "/home/publisher.pid'")
+    assert(exitOf(junk) == 0, junk)
+    var st = cli("svc-state", "status --company company.kofmd --store pub.db")
+    assert(exitOf(st) == 0, st)
+    assert(has(outOf(st), "service      : parado"), outOf(st))
+
+    // stop on a stale pid file is a clean no-op, not an error
+    var stop2 = cli("svc-state", "stop")
+    assert(exitOf(stop2) == 0, stop2)
+    assert(has(outOf(stop2), "ja estava parado"), stop2)
+    forceCleanup("svc-state")
+}
+
+test "service: start never flips assisted to autonomous" {
+    prepare("svc-mode")
+    var s = cli("svc-mode", "start --company company.kofmd --store pub.db")
+    assert(exitOf(s) == 0, s)
+    var st = cli("svc-mode", "status --company company.kofmd --store pub.db")
+    assert(exitOf(st) == 0, st)
+    // the profile declares assisted; bringing the service up must not change it
+    assert(has(outOf(st), "mode=assisted"), outOf(st))
+    assert(has(outOf(st), "publicacao   : ASSISTIDA"), outOf(st))
+    var stop = cli("svc-mode", "stop")
+    assert(exitOf(stop) == 0, stop)
+    forceCleanup("svc-mode")
+}
+
+// REGRESSION (AUD-4): concurrent `start` calls used to race between "no pid
+// file yet" and the daemon writing its pid, launching TWO daemons for one
+// profile. The start lock must serialize them so exactly one daemon survives.
+test "service: concurrent starts launch exactly one daemon" {
+    prepare("svc-race")
+    // four starts at once, each with its own timeout so a regression hangs the
+    // test rather than the suite
+    var cmd = "cd '" + workDir("svc-race") + "'"
+        + " && for i in 1 2 3 4; do ( KOF_PUBLISHER_HOME='" + workDir("svc-race") + "/home'"
+        + " timeout 40 java -cp '" + classpath() + "' Default.Main start --company company.kofmd --store pub.db > s$i.txt 2>&1 ) & done; wait; echo RACEDONE"
+    var r = runCmd(cmd)
+    assert(has(outOf(r), "RACEDONE"), "starts did not finish:\n" + r)
+
+    // exactly one daemon, identified by cwd + java executable
+    var count = runCmd("for p in $(pgrep -f 'Default.Main daemo[n]'); do echo $(readlink /proc/$p/cwd) $(readlink /proc/$p/exe); done | grep -c '^" + workDir("svc-race") + " .*java$'")
+    assert(exitOf(count) == 0 && outOf(count).trim() == "1", "expected exactly one daemon after 4 concurrent starts, got:\n" + count)
+    // the losers did not error out; they reported the winner
+    var active = runCmd("grep -l 'ja ativo' '" + workDir("svc-race") + "'/s*.txt | wc -l")
+    assert(outOf(active).trim() == "3", "losers should report 'ja ativo', got:\n" + active)
+    // the lock is released (not left behind to block the next start)
+    var lock = runCmd("test -d '" + workDir("svc-race") + "/home/publisher.start.lock' && echo HELD || echo FREE")
+    assert(has(outOf(lock), "FREE"), "start lock was left behind:\n" + lock)
+
+    var stop = cli("svc-race", "stop")
+    assert(exitOf(stop) == 0, stop)
+    forceCleanup("svc-race")
+}

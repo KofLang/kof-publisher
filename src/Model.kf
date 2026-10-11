@@ -82,6 +82,38 @@ String joinedOf(List<String> items) {
     return out
 }
 
+// KofMD LIST fields (guide/topics/avoid/opinions/facts/diversity/…) are
+// carried through the flat Section carrier as ONE string per key. Joining on
+// a comma would shred any item that itself contains a comma ("usa IA e gosta,
+// mas detesta hype" -> three items). Newline is the safe separator: a KofMD
+// list item is always a single line, so it can never contain a raw newline.
+// `days` keeps the comma form (it is a closed set and also arrives as
+// `--days mon,wed` from the CLI).
+String joinItems(List<String> items) {
+    var out = ""
+    for (var it in items) {
+        if (out != "") {
+            out = out + "\n"
+        }
+        out = out + it
+    }
+    return out
+}
+
+List<String> splitItems(String raw) {
+    var out = listOf<String>()
+    if (raw == "") {
+        return out
+    }
+    for (var part in raw.split("\n")) {
+        var t = part.trim()
+        if (t != "") {
+            out.add(t)
+        }
+    }
+    return out
+}
+
 test "occurrence keys are deterministic" {
     assert(occurrenceKeyOf("technical", "2026-03-30T09:00:00-03:00") == "technical@2026-03-30T09:00:00-03:00")
     assert(occurrenceKeyOf("technical", "2026-03-30T09:00:00-03:00") == occurrenceKeyOf("technical", "2026-03-30T09:00:00-03:00"))
@@ -100,4 +132,12 @@ test "status transitions are closed" {
     assert(validTransition(statusPublishing(), statusPublished()))
     assert(!validTransition(statusDraft(), statusPublished()))
     assert(!validTransition(statusPublished(), statusDraft()))
+}
+
+test "list items survive internal commas (newline separator)" {
+    var items = listOf("usa IA e gosta, mas detesta hype", "texto corrido, poucos paragrafos")
+    var back = splitItems(joinItems(items))
+    assert(back.size() == 2)
+    assert(back.get(0) == "usa IA e gosta, mas detesta hype")
+    assert(back.get(1) == "texto corrido, poucos paragrafos")
 }

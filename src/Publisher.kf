@@ -14,6 +14,7 @@ String publisherUsage() {
     u = u + "  init                       create company.kofmd template + state home\n"
     u = u + "  check                      validate company.kofmd + KofLM availability\n"
     u = u + "  generate [--topic t] [--ideas N] [--publish-ok]  drafts via KofLM\n"
+    u = u + "  plan                       uma proposta por categoria/horario (assisted, dry-run, NAO publica)\n"
     u = u + "  list [--status s]          the publication queue\n"
     u = u + "  review <id>                show draft + deterministic validation\n"
     u = u + "  approve <id> | reject <id> lifecycle\n"
@@ -22,7 +23,14 @@ String publisherUsage() {
     u = u + "  schedule --name n --days mon,wed,fri --at 09:00 [--timezone z] [--topic t] [--mode m] [--target tg] [--every N] [--anchor d]\n"
     u = u + "  schedules                  persisted agendas + next occurrences\n"
     u = u + "  sync                       load the # schedule blocks of company.kofmd\n"
+    u = u + "  github [--limit N] [--repo owner/name] [--force] [--show]  analisa projetos publicos (so leitura) e alimenta o material\n"
+    u = u + "  research [--sources a,b] [--rss url] [--query q]  consulta as fontes atuais e lista candidatos com url/data\n"
+    u = u + "  db-stats                   diagnostico do banco: registros por estado, pautas, fontes, tamanho, limite, integridade\n"
+    u = u + "  db-prune [--vacuum]        aplica a retencao (so remove registros terminais, mais antigos primeiro)\n"
     u = u + "  daemon                     run the recurring agenda (STOP file / Ctrl-C)\n"
+    u = u + "  start                      sobe o daemon em segundo plano (setsid); nao duplica\n"
+    u = u + "  stop                       para o daemon com graca (STOP file; TERM so no pid certo)\n"
+    u = u + "  status                     estado do servico + fila + proximo horario + modo\n"
     u = u + "  history [--schedule n]     occurrence history\n"
     u = u + "global: --company <file>  --store <db>\n"
     return u
@@ -168,7 +176,7 @@ Int cmdGenerate(Store store, Company company, List<String> args) {
     if (strings.isNumeric(rawIdeas)) {
         ideas = toIntStr(rawIdeas)
     }
-    var ed = Editorial(company)
+    var ed = editorialWithSources(store, company)
     var sched = Scheduler(store, company)
     if (company.sourceRepo() != "") {
         var lf = labFacts(company, labMarkerPath())
@@ -183,7 +191,7 @@ Int cmdGenerate(Store store, Company company, List<String> args) {
         println("Material da lab (desde " + lf.window() + "):")
         println(lf.digest())
     }
-    var recent = store.recentPublishedContents(8)
+    var recent = store.recentEditorialContents(8, "")
     var targetName = flagValue(args, "--target", firstNonEmpty(company.publishingTarget(), "linkedin"))
     var produced = 0
     if (topic == "") {
@@ -198,7 +206,7 @@ Int cmdGenerate(Store store, Company company, List<String> args) {
                 break
             }
             produced = produced + generateOne(store, sched, ed, company, t, recent, hasFlag(args, "--publish-ok"), targetName)
-            recent = store.recentPublishedContents(8)
+            recent = store.recentEditorialContents(8, "")
         }
     } else {
         produced = generateOne(store, sched, ed, company, topic, recent, hasFlag(args, "--publish-ok"), targetName)
@@ -236,7 +244,7 @@ Int generateOne(Store store, Scheduler sched, Editorial ed, Company company, Str
         status = statusApproved()
     }
     var now = sched.nowStamp()
-    store.savePublication(Publication(id, company.name(), topic, draft, status, now, "", "", targetName, lmModel(), company.digest(), "", "", "", id, 0))
+    store.savePublication(Publication(id, company.name(), topic, draft, status, now, "", "", targetName, lmModel(), company.digest(), "", "", "", id, 0, ""))
     println("OK " + id + "  [" + status + "]  " + strings.truncate(topic, 48))
     if (autoPublish) {
         var rep = sched.publishWithRetry("cli-" + id, "cli", "", id, topic, draft, now, targetName)
@@ -250,6 +258,361 @@ Int generateOne(Store store, Scheduler sched, Editorial ed, Company company, Str
         }
     }
     return 1
+}
+
+// A category's topic seed: its specific angle when present, else its label.
+// Pure — no extra LM call just to name the slot (acceptance §9: no expensive
+// calls without need).
+String planTopicFor(Category c) {
+    if (c.angle() != "") {
+        return strings.truncate(c.angle(), 90)
+    }
+    return c.label()
+}
+
+// `plan` — prepare ONE proposal per editorial category (the daily 06/12/15/18
+// slots) and present them for human review. It NEVER publishes: proposals are
+// stored as `review` and the target is `dryrun`; the author decides later
+// (acceptance §10/§11). It refuses to invent: a company with no material
+// skips honestly, and a slot with no publishable draft is reported as such.
+// The sourced material handed to the generator for one plan choice. It is the
+// CONCRETE artifact behind the pauta — a repository digest, a story with its
+// URL and dates — and it travels with its provenance, because the generator
+// must be able to tell documentation from verified behaviour.
+String planEvidenceBlock(Store store, PlanChoice ch, ResearchRun research) {
+    var c = ch.candidate()
+    var b = ""
+    if (c.origin() == "repo") {
+        var r = store.findRepoState(c.origin_ref())
+        if (r != null) {
+            b = b + "EVIDENCIA DE PROJETO (analise persistida, so leitura):\n" + r.digest() + "\n"
+            // The digest already carries its own level labels, and the model
+            // still upgraded them: the first real run (2026-10-11) turned "ha
+            // arquivos/pastas de teste (nome), o que NAO prova cobertura" into
+            // "a estrutura de testes cobre invariantes criticos". Restating the
+            // limit where the model is actually reading is what holds the line.
+            b = b + "LIMITE DESTE MATERIAL: a analise e SO LEITURA. Voce NAO executou nada, NAO rodou os testes e NAO verificou comportamento.\n"
+            b = b + "Nao suba o nivel da afirmacao: 'ha arquivos de teste' nao e 'os testes cobrem ou garantem'; 'documentado' nao e 'verificado rodando'.\n"
+            b = b + "Descreva o que mudou no PROJETO (o que o log e o README mostram), nao o que voce teria feito num dia especifico.\n"
+            // The README states intentions in the future tense ("Kof is the
+            // integration layer later", "the design targets z/OS"). The first
+            // real run (2026-10-11) read "later" as "now" and wrote "agora tem
+            // uma camada de integracao em Kof" — a planned thing asserted as
+            // built, which is the same class of error as documented vs built.
+            b = b + "O README diz o que o projeto PRETENDE, nao so o que ja existe: 'later', 'targets', 'design' e 'todo' sao PLANO, nao fato.\n"
+            b = b + "Nao escreva que algo ja existe porque o README o descreve no presente; o que esta no log de commits e o que de fato aconteceu.\n"
+            b = b + "Proibido narrar episodio: 'passei a manha/tarde olhando', 'me deparei com', 'ontem eu', 'tive que'.\n"
+        }
+    } else {
+        if (c.origin() == "profile") {
+            var isReject = c.origin_ref().indexOf("#rejects") >= 0
+            if (isReject) {
+                b = b + "MATERIAL REGISTRADO DO PERFIL — o que a autora RECUSA (e so isso):\n"
+                b = b + "- padrao recusado: " + c.theme() + "\n"
+            } else {
+                b = b + "MATERIAL REGISTRADO DO PERFIL (o que a autora declarou, e so isso):\n"
+                b = b + "- posicao registrada: " + c.theme() + "\n"
+            }
+            // An opinion slot has a THESIS in the material and nothing else —
+            // no day, no case, no number. Measured on the first real run: the
+            // 15:00 post opened with "Passei a tarde debugando um problema de
+            // concorrencia em uma fila de mensagens", an episode that exists
+            // nowhere in the profile.
+            b = b + "LIMITE DESTE MATERIAL: o que existe aqui e uma POSICAO (uma tese sobre como ela avalia o assunto), nao um episodio.\n"
+            b = b + "Nao existe no material nenhum caso vivido, nenhum dia, nenhuma data, nenhum cliente, nenhum time, nenhum incidente, nenhum numero.\n"
+            b = b + "Desenvolva a POSICAO como raciocinio (o criterio, o contraste, o que ela aceita e o que ela recusa), NAO narre um episodio.\n"
+            b = b + "Proibido: 'passei a tarde', 'ontem', 'esses dias', 'tive que', 'aconteceu comigo', 'no meu caso', 'aqui no time', 'no projeto em que trabalho', um bug especifico que voce teria corrigido.\n"
+            b = b + "Se a tese so se sustenta com um caso, o caso tem que ser declaradamente hipotetico, ou o texto fica na analise geral.\n"
+            if (isReject) {
+                b = b + "Voce esta escrevendo sobre um padrao que ela RECUSA: descreva o padrao e por que ele e ruim, sem narrar quem fez isso nem quando.\n"
+            }
+        }
+        if (c.origin() == "research") {
+            b = b + "NOTICIA CONSULTADA (titulo, url, data de publicacao e data de consulta):\n"
+            for (var it in research.items()) {
+                if (it.topic_key() == c.topic_key()) {
+                    b = b + "- titulo: " + it.title() + "\n"
+                    b = b + "  url: " + it.url() + "\n"
+                    b = b + "  veiculo: " + it.publisher() + "\n"
+                    b = b + "  publicado_em: " + firstNonEmpty(it.published_at(), "(a fonte nao informou)") + "\n"
+                    b = b + "  consultado_em: " + it.fetched_at() + "\n"
+                    if (it.summary() != "") {
+                        b = b + "  resumo_da_fonte: " + it.summary() + "\n"
+                    }
+                }
+            }
+            b = b + "LIMITE DESTE MATERIAL: titulo, url, datas e o resumo acima — o que a FONTE publicou sobre o item, nao o texto integral.\n"
+            b = b + "Nao afirme ter lido o artigo alem disso, nao descreva secoes, exemplos ou resultados que nao estejam no resumo.\n"
+            // Measured on the real run: handed a blurb about a colour picker,
+            // the generator wrote that the tool "usa sensores e logica
+            // deterministica local" — an architecture nobody stated. A blurb
+            // describes a project, it does not disclose its implementation.
+            b = b + "Nao descreva COMO a ferramenta funciona por dentro (arquitetura, sensores, algoritmos, bibliotecas, modelos) nem ONDE o projeto fica hospedado (GitHub, GitLab, pacote publicado) a menos que o resumo diga: o material nao contem isso.\n"
+            b = b + "Voce pode comentar a IDEIA e o que ela muda; nao invente o mecanismo.\n"
+        }
+    }
+    // An opinion slot deliberately gets NO attached headline. It was tried
+    // (2026-10-11) and produced exactly the failure the profile itself lists
+    // under `rejects`: the generator, handed a title it could not interpret
+    // ("2D Vehicles"), spent a paragraph guessing what the thing was. A title
+    // that needs explaining is not a hook, it is an invitation to invent. The
+    // slot's thesis comes from the author's registered positions, which is
+    // material she actually stands behind.
+    return b
+}
+
+// The objective line that frames the slot for the generator.
+String planObjective(PlanChoice ch) {
+    var o = "funcao editorial deste horario: " + planFunctionLabel(ch.function())
+    if (ch.function() == "noticias") {
+        o = o + ". Escreva SOBRE a noticia, sustentando cada afirmacao factual no material fornecido; nao acrescente numero, data, nome ou promessa que nao esteja ali"
+    }
+    if (ch.function() == "projetos") {
+        o = o + ". Escreva sobre o trabalho real do projeto, distinguindo o que esta documentado do que foi verificado"
+    }
+    if (ch.function() == "contraponto") {
+        o = o + ". Assuma uma posicao tecnica e sustente com argumento; discorde do hype, nao das pessoas"
+    }
+    if (ch.function() == "observacao") {
+        o = o + ". Observacao, provocacao ou humor sobre o trabalho de engenharia; sem licao de moral"
+    }
+    return o
+}
+
+// Persist the pauta behind a proposal: the TopicRecord (what was chosen and
+// why) plus one SourceRef per source actually consulted. This is what makes
+// repetition detection and later auditing possible — without it, the next run
+// would have no memory of the reasoning, only of the text.
+String persistPlanTopic(Store store, Company company, PlanChoice ch, String pubId, ResearchRun research, String now) {
+    var c = ch.candidate()
+    var tid = "top-" + ch.clock().replace(":", "") + "-" + strings.truncate(uuid.v4(), 8)
+    var arg = c.argument()
+    var simHash = strings.truncate(strings.slugify(c.theme() + " " + arg), 60)
+    store.saveTopic(TopicRecord(
+        tid,
+        c.topic_key(),
+        c.theme(),
+        arg,
+        ch.function(),
+        c.origin_ref(),
+        now,
+        now,
+        simHash,
+        statusReview(),
+        pubId,
+        c.evidence(),
+        "pendente",
+        "",
+        joinList(store.recentTopics(3))))
+    for (var it in research.items()) {
+        if (it.topic_key() != c.topic_key()) {
+            continue
+        }
+        store.saveSource(SourceRef(
+            tid + "::" + strings.slugify(it.url()),
+            tid,
+            strings.slugify(it.url()),
+            it.url(),
+            it.title(),
+            it.publisher(),
+            it.published_at(),
+            it.fetched_at(),
+            it.summary(),
+            it.source_type()))
+    }
+    return tid
+}
+
+// Record the outcome of the two validation gates on the pauta. Kept as a
+// separate write because the gates run AFTER the pauta is created (the factual
+// proxy needs the persisted sources to check against).
+Int markTopicOutcome(Store store, String tid, String validation, String caveat) {
+    var t = store.findTopic(tid)
+    if (t == null) {
+        return 1
+    }
+    store.saveTopic(TopicRecord(
+        t.id(), t.topic_key(), t.theme(), t.argument(), t.category(), t.entities(),
+        t.researched_at(), t.last_used_at(), t.similarity_hash(), t.status(), t.publication_id(),
+        t.evidence(), validation, caveat, t.related_topics()))
+    return 0
+}
+
+// `plan` — build the day's four proposals from REAL material.
+//
+// This is the whole editorial pipeline in one command:
+//   1. consult the current sources (research)
+//   2. gather candidates per editorial function (repos, stories, opinions)
+//   3. score them transparently and pick one per slot
+//   4. generate, validate, revise, validate again
+//   5. persist the pauta + its sources + the draft, as REVIEW
+//
+// It NEVER publishes, and it never fills a slot it cannot support: a slot with
+// no candidate comes back as SKIP with the reason, and the command says so in
+// the summary. Mode stays whatever the profile declares (assisted).
+Int cmdPlan(Store store, Company company, List<String> args) {
+    var cats = company.categories()
+    if (cats.size() == 0) {
+        println("publisher: plano exige secoes '# category <nome>' com clock/label/angle em " + company.path())
+        return 1
+    }
+    var sched = Scheduler(store, company)
+    var now = sched.nowStamp()
+
+    // ---- 1. research ----
+    var sources = company.researchSources()
+    var rawSources = flagValue(args, "--sources", "")
+    if (rawSources != "") {
+        sources = listOf<String>()
+        for (var s in rawSources.split(",")) {
+            if (s.trim() != "") {
+                sources.add(s.trim())
+            }
+        }
+    }
+    var noResearch = hasFlag(args, "--no-research")
+    var run = ResearchRun(listOf<ResearchItem>(), listOf<String>(), 0)
+    if (!noResearch) {
+        println("Pesquisando fontes atuais...")
+        run = researchRun(company.timezone(), sources, listOf<String>(), "")
+        for (var n in run.notes()) {
+            println("  " + n)
+        }
+        println("")
+    }
+
+    // ---- 2/3. candidates + selection ----
+    var recentThemes = store.recentTopicThemes(12)
+    for (var t in store.recentTopics(12)) {
+        recentThemes.add(t)
+    }
+    var repoMaxAgeDays = 0
+    var rawAge = flagValue(args, "--repo-max-age-days", "0")
+    if (strings.isNumeric(rawAge)) {
+        repoMaxAgeDays = toIntStr(rawAge)
+    }
+    var plan = buildPlan(company, store, run, repoMaxAgeDays, recentThemes)
+
+    println("Plano editorial — " + company.name() + " (" + cats.size() + " horarios, modo " + company.mode() + ", dry-run, NAO publica)")
+    for (var n in plan.notes()) {
+        println("  " + n)
+    }
+    println("")
+
+    var recent = store.recentEditorialContents(8, "")
+    var proposals = 0
+    var skipped = 0
+    var invalid = 0
+    for (var ch in plan.choices()) {
+        var head = "---- " + ch.clock() + "  [" + planFunctionLabel(ch.function()) + "]"
+        if (!ch.chosen()) {
+            println(head + "  -> SKIP ----")
+            println("motivo: " + ch.skip_reason())
+            println("")
+            skipped = skipped + 1
+            continue
+        }
+        var c = ch.candidate()
+        println(head + " ----")
+        println("tema: " + c.theme())
+        println("origem: " + c.origin() + "  " + c.origin_ref())
+        println("pontuacao: " + c.score() + "/100")
+        for (var sn in c.score_notes()) {
+            println("  " + sn)
+        }
+        println("evidencia: " + c.evidence())
+
+        var ed = Editorial(company)
+        var block = planEvidenceBlock(store, ch, run)
+        if (block != "") {
+            ed = ed.withExtra(block)
+        }
+        var draft = ""
+        var v = Validation(false, listOf<String>("nada gerado"), listOf<String>())
+        var round = 0
+        while (round < 3) {
+            try {
+                draft = ed.generateIn(c.theme(), recent, planObjective(ch), ch.label(), ch.angle())
+            } catch (String e) {
+                if (e.startsWith("SKIP") || e.startsWith("LAB-SKIP")) {
+                    println("resultado: SKIP — " + e)
+                    println("")
+                    skipped = skipped + 1
+                    draft = ""
+                    break
+                }
+                throw e
+            }
+            v = ed.validate(draft, recent)
+            if (v.ok()) {
+                break
+            }
+            draft = ed.reviseIn(draft, v, recent, ch.label(), ch.angle())
+            var v2 = ed.validate(draft, recent)
+            if (v2.ok()) {
+                v = v2
+                break
+            }
+            v = v2
+            round = round + 1
+        }
+        if (draft == "") {
+            continue
+        }
+        if (!v.ok()) {
+            println("resultado: DESCARTADO pela validacao")
+            println(joinList(v.problems()))
+            println("")
+            invalid = invalid + 1
+            continue
+        }
+        var id = "pub-" + strings.slugify(ch.clock()) + "-" + strings.slugify(ch.category_name()) + "-" + strings.truncate(uuid.v4(), 8)
+        var tid = persistPlanTopic(store, company, ch, id, run, now)
+        var srcs = store.sourcesByTopic(tid)
+        // Second gate: the mechanical FACTUAL proxy, run against the sources
+        // that were actually persisted for this pauta. Editorial quality and
+        // factual grounding are separate questions and are checked separately.
+        var fc = ed.validateFactual(draft, srcs, c.origin(), c.published_at(), c.evidence())
+        if (!fc.ok()) {
+            // The pauta was persisted but the draft is not publishable: record
+            // it as a REVIEW item with the problem, never as approved.
+            store.savePublication(Publication(id, company.name(), c.theme(), draft, statusReview(), now, "", "", "dryrun", lmModel(), company.digest(), "", "", "", id, 0, tid))
+            markTopicOutcome(store, tid, "review-com-ressalva", joinList(fc.problems()))
+            for (var fp in fc.problems()) {
+                println("  problema: " + fp)
+            }
+            for (var fw in fc.warnings()) {
+                println("  warn: " + fw)
+            }
+            println("")
+            invalid = invalid + 1
+            continue
+        }
+        store.savePublication(Publication(id, company.name(), c.theme(), draft, statusReview(), now, "", "", "dryrun", lmModel(), company.digest(), "", "", "", id, 0, tid))
+        markTopicOutcome(store, tid, "validado", "")
+        observability.increment("publisher.content.generated", 1)
+        observability.increment("publisher.content.validated", 1)
+        println("id: " + id + "  pauta: " + tid + "  (" + draft.length + " chars)")
+        println(draft)
+        println("validacao editorial: OK deterministica")
+        println("validacao factual : OK (proxy mecanico, " + srcs.size() + " fonte(s) rastreada(s))")
+        for (var w in v.warnings()) {
+            println("warn: " + w)
+        }
+        for (var fw in fc.warnings()) {
+            println("warn factual: " + fw)
+        }
+        println("")
+        proposals = proposals + 1
+        recent = store.recentEditorialContents(8, "")
+    }
+
+    println("OK " + proposals + " proposta(s) em REVIEW, " + skipped + " horario(s) sem material, " + invalid + " descartada(s) pela validacao.")
+    println("Nada foi publicado. Fontes: " + run.items().size() + " candidato(s), " + run.failures() + " falha(s).")
+    if (proposals == 0) {
+        return 1
+    }
+    return 0
 }
 
 Int cmdList(Store store, List<String> args) {
@@ -302,10 +665,38 @@ Int cmdReview(Store store, Company company, List<String> args) {
     if (p.error() != "") {
         println("error     : " + p.error())
     }
+    // Provenance: the pauta behind the post, its central argument, the sources
+    // actually consulted (with BOTH dates) and what the gates concluded. This
+    // is the audit trail a human needs to decide, so it is printed before the
+    // text itself.
+    var topic = store.findTopic(p.topic_id())
+    if (topic != null) {
+        println("---- pauta ----")
+        println("funcao    : " + topic.category())
+        println("argumento : " + topic.argument())
+        println("evidencia : " + topic.evidence())
+        println("pesquisado: " + topic.researched_at())
+        println("validacao : " + topic.validation())
+        if (topic.caveat() != "") {
+            println("ressalva  : " + topic.caveat())
+        }
+        var srcs = store.sourcesByTopic(topic.id())
+        if (srcs.size() > 0) {
+            println("---- fontes (" + srcs.size() + ") ----")
+            for (var sr in srcs) {
+                println("- " + sr.title())
+                println("  url        : " + sr.url())
+                println("  veiculo    : " + sr.publisher() + " (" + sr.source_type() + ")")
+                println("  publicado  : " + firstNonEmpty(sr.published_at(), "(a fonte nao informou)"))
+                println("  consultado : " + sr.fetched_at())
+            }
+        }
+    }
     println("---- conteudo ----")
     println(p.content())
-    println("---- validacao ----")
-    var v = Editorial(company).validate(p.content(), store.recentPublishedContents(8))
+    println("---- validacao editorial ----")
+    var ed = Editorial(company)
+    var v = ed.validate(p.content(), store.recentEditorialContents(8, p.id()))
     if (v.ok()) {
         println("OK deterministico: aprovado")
     } else {
@@ -314,6 +705,44 @@ Int cmdReview(Store store, Company company, List<String> args) {
     for (var w in v.warnings()) {
         println("warn: " + w)
     }
+    // Factual proxy: re-run here so the reviewer sees it at decision time, not
+    // only at generation time.
+    println("---- validacao factual (proxy mecanico) ----")
+    var srcs2 = listOf<SourceRef>()
+    var origin = ""
+    var publishedAt = ""
+    var factualEvidence = ""
+    if (topic != null) {
+        srcs2 = store.sourcesByTopic(topic.id())
+        origin = topic.category()
+        factualEvidence = topic.evidence()
+        for (var sr in srcs2) {
+            if (sr.published_at() != "") {
+                publishedAt = sr.published_at()
+            }
+        }
+        // `category` on the pauta holds the FUNCTION (projetos|noticias|...);
+        // map back to the origin the factual check expects.
+        if (origin == "noticias") {
+            origin = "research"
+        } else {
+            if (origin == "projetos") {
+                origin = "repo"
+            } else {
+                origin = "profile"
+            }
+        }
+    }
+    var fc = ed.validateFactual(p.content(), srcs2, origin, publishedAt, factualEvidence)
+    if (fc.ok()) {
+        println("OK: nenhum problema factual mecanico detectado")
+    } else {
+        println("FAIL: " + joinList(fc.problems()))
+    }
+    for (var fw in fc.warnings()) {
+        println("warn: " + fw)
+    }
+    println("LIMITE: este check e um proxy mecanico. Ele nao decide se uma frase e verdadeira; o gate real e a revisao humana.")
     if (p.status() == statusReview()) {
         println("")
         println("aprovar?  publisher approve " + p.id())
@@ -332,7 +761,7 @@ Int cmdTransition(Store store, String id, String to, String err) {
         println("publisher: transicao invalida: " + p.status() + " -> " + to + " (id " + id + ")")
         return 1
     }
-    store.savePublication(Publication(p.id(), p.company(), p.topic(), p.content(), to, p.created_at(), p.scheduled_at(), p.published_at(), p.target(), p.model(), p.context_version(), p.recurrence_id(), p.external_id(), err, p.occurrence_key(), p.attempts()))
+    store.savePublication(Publication(p.id(), p.company(), p.topic(), p.content(), to, p.created_at(), p.scheduled_at(), p.published_at(), p.target(), p.model(), p.context_version(), p.recurrence_id(), p.external_id(), err, p.occurrence_key(), p.attempts(), p.topic_id()))
     println("OK " + id + ": " + p.status() + " -> " + to)
     return 0
 }
@@ -464,10 +893,534 @@ Int cmdSync(Store store, Company company) {
     return 0
 }
 
+// Editorial instance carrying every SOURCED extra material the profile
+// declares: the persisted GitHub project digest, when enabled. No network
+// here — it reads what `github` already analyzed (acceptance §4).
+Editorial editorialWithSources(Store store, Company company) {
+    var ed = Editorial(company)
+    if (company.github().enabled()) {
+        var gh = githubDigest(store, company, 4)
+        if (gh != "") {
+            ed = ed.withExtra(gh)
+        }
+    }
+    return ed
+}
+
+// Does a repo need (re)analysis? Yes when unknown, when the upstream push
+// moved, or when forced. This is the INCREMENTAL gate (§2.7): an unchanged
+// repo is not re-read, so the API budget is not burned and a project's facts
+// do not silently drift.
+Bool repoNeedsAnalysis(Store store, String fullName, String pushedAt, Bool force) {
+    if (force) {
+        return true
+    }
+    var prev = store.findRepoState(fullName)
+    if (prev == null) {
+        return true
+    }
+    if (prev.digest() == "") {
+        return true
+    }
+    return prev.pushed_at() != pushedAt
+}
+
+// `github` — READ-ONLY analysis of the author's public projects (§2). It
+// confirms the DECLARED account is personal (evidence, §2.1), discovers its
+// public repos plus any declared org's, and persists a per-repo digest for
+// incremental use. It never writes to GitHub, never touches private repos,
+// never stores a credential, and never publishes anything.
+Int cmdGithub(Store store, Company company, List<String> args) {
+    if (!company.github().enabled()) {
+        println("publisher: github desabilitado — declare a secao '# github' com 'account:' e 'enabled: true' em " + company.path())
+        return 1
+    }
+    var account = company.github().account()
+    var limit = 8
+    var rawLimit = flagValue(args, "--limit", "8")
+    if (strings.isNumeric(rawLimit)) {
+        limit = toIntStr(rawLimit)
+    }
+    var onlyRepo = flagValue(args, "--repo", "")
+    var force = hasFlag(args, "--force")
+    var ed = Scheduler(store, company)
+    var now = ed.nowStamp()
+
+    // `--show` is a pure READ of what was already persisted (incremental
+    // memory): it needs no network, so a rate-limited or offline API never
+    // hides knowledge the publisher already has. It is not a sync.
+    if (hasFlag(args, "--show")) {
+        println("---- conhecimento persistido (ja sanitizado, sem rede) ----")
+        var rows = store.allRepoStates()
+        if (rows.size() == 0) {
+            println("(nada analisado ainda — rode 'publisher github' sem --show)")
+            return 0
+        }
+        for (var row in rows) {
+            println(row.digest())
+            println("")
+        }
+        return 0
+    }
+
+    if (account != "") {
+        var ev = ghConfirmPersonal(account)
+        println("conta pessoal : " + account)
+        println("evidencia     : " + ev.detail())
+        if (!ev.ok()) {
+            println("publisher: conta NAO confirmada como pessoal — recusando analisar como se fosse da autora")
+            return 1
+        }
+    }
+
+    var candidates = listOf<GhRepo>()
+    var owners = listOf<String>()
+    if (account != "") {
+        owners.add(account)
+    }
+    for (var o in company.github().orgs()) {
+        owners.add(o)
+    }
+    var isOrgFlags = listOf<Bool>()
+    var personalFlags = listOf<Bool>()
+    if (account != "") {
+        isOrgFlags.add(false)
+        personalFlags.add(true)
+    }
+    for (var o in company.github().orgs()) {
+        isOrgFlags.add(true)
+        personalFlags.add(false)
+    }
+    var privateNames = listOf<String>()
+    var listFailed = false
+    var k = 0
+    while (k < owners.size()) {
+        var listing = ghListOwner(owners.get(k), isOrgFlags.get(k), 2)
+        for (var r in listing.repos()) {
+            candidates.add(r)
+        }
+        for (var pn in listing.privateNames()) {
+            privateNames.add(pn)
+        }
+        if (listing.failed()) {
+            listFailed = true
+        }
+        k = k + 1
+    }
+    if (candidates.size() == 0) {
+        // AUDIT FIX (AUD-5): distinguish "the API failed / answered garbage"
+        // from "this account really has no public repo". Reporting the first
+        // as the second is a false claim about the author.
+        if (listFailed) {
+            println("publisher: nao foi possivel listar os repositorios de " + joinList(owners) + " (erro ou resposta ilegivel da API) — nada analisado, nada inventado")
+            return 1
+        }
+        println("publisher: nenhum repositorio publico encontrado para " + joinList(owners))
+        return 1
+    }
+    // AUDIT FIX (AUD-6): a `--repo` that matches nothing used to fall through to
+    // the summary as "0 analisado(s)" with exit 0 — a silent success that reads
+    // like "there was nothing to do". An explicit miss is an error.
+    if (onlyRepo != "") {
+        var matched = 0
+        for (var cand in candidates) {
+            if (cand.full_name() == onlyRepo) {
+                matched = matched + 1
+            }
+        }
+        if (matched == 0) {
+            println("publisher: repositorio '" + onlyRepo + "' nao encontrado entre os publicos de " + joinList(owners))
+            return 1
+        }
+    }
+
+    var analyzed = 0
+    var skipped = 0
+    var forks = 0
+    var privateSkipped = 0
+    var docCount = 0
+    var foundCount = 0
+    var testsFound = 0
+    var verified = 0
+    var errors = 0
+    var budget = limit
+    println("")
+    println("Projetos publicos (somente leitura; nada foi executado nem publicado):")
+    for (var repo in candidates) {
+        var full = repo.full_name()
+        if (onlyRepo != "" && full != onlyRepo) {
+            continue
+        }
+        if (company.github().include().size() > 0 && onlyRepo == "") {
+            var inc = false
+            for (var pat in company.github().include()) {
+                if (full == pat || full.endsWith("/" + pat)) {
+                    inc = true
+                }
+            }
+            if (!inc) {
+                continue
+            }
+        }
+        if (repo.fork()) {
+            forks = forks + 1
+            continue
+        }
+        // AUDIT FIX (AUD-2): a repo the API marks private is NEVER read, even if
+        // it appears in the listing (a token with private scope can surface it).
+        // Public source only — this is the whole contract of the GitHub source.
+        if (privateNames.indexOf(full) >= 0) {
+            privateSkipped = privateSkipped + 1
+            println("  x " + full + "  (repositorio PRIVADO — nao lido)")
+            continue
+        }
+        var pushed = repo.pushed_at()
+        if (pushed == null) {
+            pushed = ""
+        }
+        if (!repoNeedsAnalysis(store, full, pushed, force)) {
+            var prev = store.findRepoState(full)
+            println("  = " + full + "  (sem mudanca desde " + pushed + " — cache, nada relido)")
+            skipped = skipped + 1
+            continue
+        }
+        if (budget <= 0) {
+            println("  . " + full + "  (limite de analise desta execucao atingido)")
+            continue
+        }
+        budget = budget - 1
+        var facts = ghAnalyze(repo)
+        var owner = full
+        var slash = full.indexOf("/")
+        if (slash >= 0) {
+            owner = full.substring(0, slash)
+        }
+        var isOrg = owners.indexOf(owner) >= 0 && owner != account
+        var rs = repoStateFrom(facts, owner, isOrg, now)
+        store.saveRepoState(rs)
+        analyzed = analyzed + 1
+        if (facts.description() != "" || facts.readmeExcerpt() != "") {
+            docCount = docCount + 1
+        } else {
+            errors = errors + 1
+        }
+        foundCount = foundCount + 1
+        if (facts.hasTests()) {
+            testsFound = testsFound + 1
+        }
+        if (rs.verified_build() || rs.verified_tests()) {
+            verified = verified + 1
+        }
+        println("  + " + full + "  [" + facts.language() + "]  documentado=" + (facts.description() != "" || facts.readmeExcerpt() != "") + " testes_encontrados=" + facts.hasTests() + " verificado_aqui=false")
+    }
+    if (errors > 0) {
+        println("  ! " + errors + " repo(s) sem leitura util (rede/limite da API) — nada foi inventado para eles")
+    }
+    println("")
+    println("resumo: " + candidates.size() + " repo(s) publico(s); " + analyzed + " analisado(s) agora, " + skipped + " em cache, " + forks + " fork(s) ignorado(s), " + privateSkipped + " privado(s) nao lido(s).")
+    println("        material documentado=" + docCount + "  encontrado_no_codigo=" + foundCount + "  com_testes_no_nome=" + testsFound + "  verificado_aqui=" + verified)
+    println("        o material vai para o proximo 'plan'/'generate' como fonte citada; nada foi publicado.")
+    return 0
+}
+
 Int cmdDaemon(Store store, Company company) {
     var sched = Scheduler(store, company)
     println("kof publisher daemon: " + sched.recoverAgenda().size() + " agenda(s) recuperada(s); encerre com " + publisherStopFile() + " ou Ctrl-C")
     sched.runForever()
+    return 0
+}
+
+// `start` — launch the recurring daemon DETACHED (setsid, new session) so it
+// survives the terminal. Reuses the existing daemon; adds only the detach and
+// the no-duplicate guard. `stop` = the STOP file the daemon already honors.
+Int cmdStart(String storePath, String companyPath) {
+    var pid = readPidFile()
+    if (pid > 0 && pidAlive(pid) && pidIsPublisher(pid)) {
+        println("publisher: ja ativo (pid " + pid + ") — nada a fazer")
+        return 0
+    }
+    if (pid > 0) {
+        println("publisher: pid file obsoleto (" + pid + ") — removendo e iniciando")
+        File(servicePidPath()).delete()
+    }
+    // AUDIT FIX (AUD-4): serialize concurrent starts. Without this lock two
+    // racing `start` calls both see "no pid" and both launch a daemon.
+    var lockResult = acquireStartLock()
+    if (lockResult != "LOCKED") {
+        println("publisher: outro start em andamento — aguardando...")
+        var lockWait = 0
+        while (lockWait < 30000) {
+            time.sleep(500)
+            lockWait = lockWait + 500
+            var q = readPidFile()
+            if (q > 0 && pidAlive(q) && pidIsPublisher(q)) {
+                println("publisher: ja ativo (pid " + q + ") — nada a fazer")
+                return 0
+            }
+        }
+        println("publisher: nao consegui obter o lock de start — tente novamente")
+        return 1
+    }
+    try {
+        return doStartLocked(storePath, companyPath)
+    } finally {
+        releaseStartLock()
+    }
+}
+
+Int doStartLocked(String storePath, String companyPath) {
+    var pid2 = readPidFile()
+    if (pid2 > 0 && pidAlive(pid2) && pidIsPublisher(pid2)) {
+        println("publisher: ja ativo (pid " + pid2 + ") — nada a fazer")
+        return 0
+    }
+    if (pid2 > 0) {
+        File(servicePidPath()).delete()
+    }
+    File(publisherStopFile()).delete()
+    Directory(defaultPublisherHome()).createDirectories()
+    // `setsid -f` ALWAYS forks, so the daemon is detached and this call returns
+    // immediately. Without -f, setsid only forks when it happens to be a process
+    // group leader, and `start` would block on the daemon forever.
+    //
+    // AUDIT FIX (AUD-7): `exec` is NOT cosmetic. `process.run` does waitFor() on
+    // the child AND reads its stdout to EOF; a plain `sh -c` stays alive as the
+    // daemon's parent and keeps that captured stdout pipe open, so `start` hung
+    // forever (measured: exit 124 after a 30s timeout, daemon up all along).
+    // `exec` replaces the shell with the daemon, whose stdout/stderr the
+    // redirections below already send to the log file, so the pipe closes.
+    var cmd = "exec " + serviceJavaBin() + " -cp " + shQuote(serviceClasspath())
+        + " Default.Main daemon --company " + shQuote(companyPath)
+        + " --store " + shQuote(storePath)
+        + " >> " + shQuote(serviceLogPath()) + " 2>&1 < /dev/null"
+    var r = process.run("setsid", "-f", "sh", "-c", cmd)
+    if (r.exitCode != 0) {
+        println("publisher: falha ao iniciar: " + strings.truncate(r.stderr, 200))
+        return 1
+    }
+    var waited = 0
+    while (waited < 20000) {
+        time.sleep(250)
+        waited = waited + 250
+        var p = readPidFile()
+        if (p > 0 && pidAlive(p)) {
+            println("OK publisher iniciado (pid " + p + ")")
+            println("   log: " + serviceLogPath())
+            println("   pare com: publisher stop")
+            return 0
+        }
+    }
+    println("publisher: iniciado, mas o pid ainda nao apareceu — verifique " + serviceLogPath())
+    return 0
+}
+
+// `stop` — graceful. Writes the STOP file the daemon honors, waits, and only
+// then sends SIGTERM to the EXACT pid (never `killall`). The store, queue and
+// history are preserved: stopping is not a wipe.
+Int cmdStop() {
+    var pid = readPidFile()
+    if (pid > 0 && pidAlive(pid) && pidIsPublisher(pid)) {
+        File(publisherStopFile()).writeText("stop\n")
+        println("publisher: stop solicitado (pid " + pid + ") — aguardando encerrar...")
+        var waited = 0
+        while (waited < 15000 && pidAlive(pid)) {
+            time.sleep(500)
+            waited = waited + 500
+        }
+        if (!pidAlive(pid)) {
+            File(servicePidPath()).delete()
+            println("OK publisher parado (pid " + pid + ")")
+            return 0
+        }
+        println("publisher: gracioso nao terminou em 15s — TERM ao pid " + pid)
+        process.run("kill", "-TERM", "" + pid)
+        var w2 = 0
+        while (w2 < 5000 && pidAlive(pid)) {
+            time.sleep(500)
+            w2 = w2 + 500
+        }
+        if (!pidAlive(pid)) {
+            File(servicePidPath()).delete()
+            println("OK publisher parado (pid " + pid + ")")
+            return 0
+        }
+        println("FAIL publisher ainda vivo (pid " + pid + ") — requer atencao manual")
+        return 1
+    }
+    if (pid > 0) {
+        File(servicePidPath()).delete()
+        println("publisher: ja estava parado (pid file obsoleto " + pid + " removido)")
+        return 0
+    }
+    println("publisher: ja estava parado")
+    return 0
+}
+
+// `status` — service state AND editorial state. "Service up" and "authorized
+// to publish" are DIFFERENT facts and are reported separately.
+Int cmdStatus(Store store, Company company) {
+    var st = computeStatus(store, company)
+    var svc = "parado"
+    if (st.active()) {
+        svc = "ATIVO (pid " + st.pid() + ")"
+    } else if (st.stale()) {
+        svc = "parado (pid file obsoleto " + st.pid() + ")"
+    }
+    var nextSlot = "-"
+    if (st.nextSlot() != "") {
+        nextSlot = st.nextSlot()
+    }
+    var lastOcc = "-"
+    if (st.lastOccurrence() != "") {
+        lastOcc = st.lastOccurrence()
+    }
+    var auth = "ASSISTIDA (revisao humana antes de publicar)"
+    if (company.mode() == "autonomous") {
+        auth = "AUTONOMA"
+    }
+    println("service      : " + svc)
+    println("perfil       : " + company.name() + "  (mode=" + company.mode() + ", target=" + firstNonEmpty(company.publishingTarget(), "linkedin") + ")")
+    println("proximo slot : " + nextSlot)
+    println("fila         : review=" + st.reviewCount() + " approved=" + st.approvedCount() + " scheduled=" + st.scheduledCount())
+    println("ultima exec  : " + lastOcc)
+    if (st.heartbeatAge() != "") {
+        println("heartbeat    : " + st.heartbeatAge())
+    }
+    if (st.lastError() != "") {
+        println("ultimo erro  : " + strings.truncate(st.lastError(), 160))
+    }
+    println("publicacao   : " + auth)
+    return 0
+}
+
+// `research` — consult the CURRENT sources and list what was actually read.
+//
+// It is deliberately a READ-ONLY report: it does not choose topics and does
+// not write to the store. What it produces is the raw, honest evidence —
+// title, url, publisher, publication date and CONSULTATION date — that topic
+// selection later has to justify itself against. A source that fails is
+// printed as a failure, never as an empty result dressed up as "nothing hot
+// today".
+Int cmdResearch(Store store, Company company, List<String> args) {
+    var sources = company.researchSources()
+    var raw = flagValue(args, "--sources", "")
+    if (raw != "") {
+        sources = listOf<String>()
+        for (var s in raw.split(",")) {
+            if (s.trim() != "") {
+                sources.add(s.trim())
+            }
+        }
+    }
+    if (sources.size() == 0) {
+        sources = listOf<String>()
+        sources.add("hackernews")
+        sources.add("devto")
+        sources.add("lobsters")
+    }
+    var rss = listOf<String>()
+    var rawRss = flagValue(args, "--rss", "")
+    if (rawRss != "") {
+        for (var u in rawRss.split(",")) {
+            if (u.trim() != "") {
+                rss.add(u.trim())
+            }
+        }
+    }
+    var query = flagValue(args, "--query", "")
+    println("Pesquisa de fontes atuais — " + company.name() + "  (timezone " + company.timezone() + ")")
+    var rssLine = ""
+    if (rss.size() > 0) {
+        rssLine = "  rss: " + joinList(rss)
+    }
+    println("fontes: " + joinList(sources) + rssLine)
+    println("")
+    var run = researchRun(company.timezone(), sources, rss, query)
+    if (run.items().size() == 0) {
+        println("publisher: nenhum candidato obtido.")
+    } else {
+        var i = 1
+        for (var it in run.items()) {
+            println(i + ". " + it.title())
+            println("   url       : " + it.url())
+            println("   fonte     : " + it.publisher() + "  (" + it.source_type() + ")")
+            println("   publicado : " + firstNonEmpty(it.published_at(), "(sem data na fonte)"))
+            println("   consultado: " + it.fetched_at())
+            if (it.summary() != "") {
+                println("   resumo    : " + it.summary())
+            }
+            println("   topic_key : " + it.topic_key())
+            i = i + 1
+        }
+    }
+    println("")
+    println("--- fontes ---")
+    for (var n in run.notes()) {
+        println("  " + n)
+    }
+    if (run.failures() > 0) {
+        println("publisher: " + run.failures() + " fonte(s) falharam — os itens acima vem apenas das que responderam. Nada foi inventado para preencher lacuna.")
+    }
+    println("OK " + run.items().size() + " candidato(s), " + run.failures() + " falha(s). Nada foi publicado nem gravado.")
+    return 0
+}
+
+// `db-stats` — the honest state of the editorial memory: how many records of
+// each kind, how much disk the database actually occupies (including WAL), and
+// whether the storage ceiling is close.
+Int cmdDbStats(Store store, Company company) {
+    var size = store.dbSizeBytes()
+    var cap = (company.retentionMaxGb() as Long) * 1073741824L
+    println("banco        : " + store.dbPath)
+    println("tamanho      : " + humanBytes(size) + "  (" + size + " bytes; inclui .db + -wal + -shm)")
+    println("journal      : " + store.journalMode())
+    println("integridade  : " + store.integrityCheck())
+    println("")
+    println("publicacoes  : " + store.countTable("publication"))
+    println("  draft      : " + store.publicationsByStatus(statusDraft()).size())
+    println("  review     : " + store.publicationsByStatus(statusReview()).size())
+    println("  approved   : " + store.publicationsByStatus(statusApproved()).size())
+    println("  scheduled  : " + store.publicationsByStatus(statusScheduled()).size())
+    println("  published  : " + store.publicationsByStatus(statusPublished()).size())
+    println("  rejected   : " + store.publicationsByStatus(statusRejected()).size())
+    println("  cancelled  : " + store.publicationsByStatus(statusCancelled()).size())
+    println("  failed     : " + store.publicationsByStatus(statusFailed()).size())
+    println("pautas       : " + store.countTable("topicrecord"))
+    println("fontes       : " + store.countTable("sourceref"))
+    println("ocorrencias  : " + store.countTable("occurrence"))
+    println("agendas      : " + store.countTable("schedule"))
+    println("repos        : " + store.countTable("repostate"))
+    println("")
+    println("retencao     : " + company.retentionRecords() + " registros (publicacoes + pautas)")
+    println("limite disco : " + company.retentionMaxGb() + " GB")
+    if (cap > 0L && size >= cap) {
+        println("ATENCAO      : teto de armazenamento ATINGIDO — novas gravacoes devem ser recusadas ate a limpeza liberar espaco")
+    }
+    return 0
+}
+
+// `db-prune` — apply retention. Terminal records only, oldest first, and only
+// while above the configured limit; live records (review/approved/scheduled/
+// publishing) are never touched. `--vacuum` is opt-in because VACUUM rewrites
+// the entire file and should be an explicit decision, not a side effect.
+Int cmdDbPrune(Store store, Company company, List<String> args) {
+    var limit = company.retentionRecords()
+    var raw = flagValue(args, "--limit", "")
+    if (raw != "" && strings.isNumeric(raw)) {
+        limit = toIntStr(raw)
+    }
+    var rep = store.pruneByCount(limit)
+    println("retencao     : limite " + limit + " registros (publicacoes + pautas)")
+    println("removidos    : " + rep.publicationsRemoved() + " publicacao(oes), " + rep.topicsRemoved() + " pauta(s), " + rep.sourcesRemoved() + " fonte(s) orfa(s)")
+    println("preservados  : " + rep.keptLive() + " publicacao(oes) em estado vivo (review/approved/scheduled/publishing)")
+    println("tamanho      : " + humanBytes(rep.bytesBefore()) + " -> " + humanBytes(rep.bytesAfter()))
+    if (hasFlag(args, "--vacuum")) {
+        var before = store.dbSizeBytes()
+        store.vacuum()
+        println("vacuum       : " + humanBytes(before) + " -> " + humanBytes(store.dbSizeBytes()))
+    } else {
+        println("vacuum       : nao executado (use --vacuum para compactar o arquivo)")
+    }
     return 0
 }
 
@@ -511,6 +1464,15 @@ Int publisherMain(List<String> args) {
         if (cmd == "init") {
             return cmdInit(storePath, companyPath)
         }
+        // start/stop operate on the SERVICE, not the editorial content: they
+        // run before loading the company so a broken .kofmd can never trap a
+        // running daemon (you can always stop it).
+        if (cmd == "start") {
+            return cmdStart(storePath, companyPath)
+        }
+        if (cmd == "stop") {
+            return cmdStop()
+        }
         var company = loadCompany(companyPath)
         if (cmd == "check") {
             var store = Store(storePath)
@@ -520,6 +1482,12 @@ Int publisherMain(List<String> args) {
         try {
             if (cmd == "generate") {
                 return cmdGenerate(store, company, rest)
+            }
+            if (cmd == "plan") {
+                return cmdPlan(store, company, rest)
+            }
+            if (cmd == "status") {
+                return cmdStatus(store, company)
             }
             if (cmd == "list") {
                 return cmdList(store, rest)
@@ -547,6 +1515,18 @@ Int publisherMain(List<String> args) {
             }
             if (cmd == "sync") {
                 return cmdSync(store, company)
+            }
+            if (cmd == "github") {
+                return cmdGithub(store, company, rest)
+            }
+            if (cmd == "research") {
+                return cmdResearch(store, company, rest)
+            }
+            if (cmd == "db-stats") {
+                return cmdDbStats(store, company)
+            }
+            if (cmd == "db-prune") {
+                return cmdDbPrune(store, company, rest)
             }
             if (cmd == "daemon") {
                 return cmdDaemon(store, company)

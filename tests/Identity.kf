@@ -1,0 +1,175 @@
+// E2E: the AUTHOR'S IDENTITY (§1) — that the profile's identity sections are
+// actually loaded and reach the editorial prompt with the fact / opinion /
+// principle / new-idea separation intact, and that the voice rules are the
+// author's, not a generic template. Runs against the real binary and a fixture
+// LM; nothing publishes to LinkedIn.
+
+String envOr(String key, String dflt) {
+    var v = config.env(key)
+    if (v != null && v != "") {
+        return v
+    }
+    return dflt
+}
+
+String publisherDir() {
+    return envOr("KOF_PUBLISHER_DIR", "/home/mel/Documentos/kof-publisher")
+}
+
+String classpath() {
+    var home = envOr("HOME", "/home/mel")
+    var drv = envOr("KOF_SQLITE_JAR", home + "/.kof/deps/org/xerial/sqlite-jdbc/3.53.4.0/sqlite-jdbc-3.53.4.0.jar")
+    return envOr("KOF_PUBLISHER_CLASSES", publisherDir() + "/build/classes")
+        + ":" + home + "/.local/share/kof/lib/kof.jar:" + drv
+}
+
+String workDir(String name) {
+    return "/tmp/kof-pub-tests/" + name
+}
+
+String runCmd(String cmd) {
+    var r = process.run("sh", "-c", cmd + " 2>&1")
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+Int exitOf(String blob) {
+    var i = blob.indexOf("||EXIT=")
+    if (i < 0) {
+        throw "no exit marker"
+    }
+    return blob.substring(i + 7).toInt()
+}
+
+String outOf(String blob) {
+    var i = blob.indexOf("||EXIT=")
+    return blob.substring(0, i)
+}
+
+Bool has(String hay, String needle) {
+    return hay.indexOf(needle) >= 0
+}
+
+void prepare(String name) {
+    var r = process.run("sh", "-c", "rm -rf '" + workDir(name) + "' && mkdir -p '" + workDir(name) + "/home'")
+    assert(r.exitCode == 0, "prepare " + name + ": " + r.stderr)
+}
+
+String cli(String name, String port, String args) {
+    var cmd = "cd '" + workDir(name) + "' && KOF_PUBLISHER_HOME='" + workDir(name) + "/home'"
+        + " KOF_LM_URL=http://127.0.0.1:" + port + " KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25"
+        + " java -cp '" + classpath() + "' Default.Main " + args + " 2>&1"
+    var r = process.run("sh", "-c", cmd)
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+String startLm(String name, String port, String mode) {
+    runCmd("pkill -f 'fake_lm_persona[l].py " + port + "' || true; true")
+    var up = runCmd("cd '" + workDir(name) + "' && { python3 '" + publisherDir() + "/tests/fake_lm_personal.py' " + port + " " + mode + " > lm.log 2>&1 & echo $! > lm.pid; }; sleep 1; curl -s -m 4 http://127.0.0.1:" + port + "/api/tags | grep -c models")
+    assert(exitOf(up) == 0 && outOf(up).trim() == "1", up)
+    return outOf(up)
+}
+
+void stopLm(String name) {
+    runCmd("kill $(cat '" + workDir(name) + "/lm.pid') 2>/dev/null || true")
+}
+
+Int promptCount(String name, String needle) {
+    var r = runCmd("grep -c '" + needle + "' '" + workDir(name) + "/prompts.log'")
+    var t = outOf(r).trim()
+    if (!strings.isNumeric(t)) {
+        return 0
+    }
+    return t.toInt()
+}
+
+test "identity: the profile loads Mel's declared facts, opinions, principles, topics, sources" {
+    prepare("id-load")
+    var cp = runCmd("cp '" + publisherDir() + "/examples/mel.kofmd' '" + workDir("id-load") + "/company.kofmd'")
+    assert(exitOf(cp) == 0, cp)
+
+    var c = cli("id-load", "1", "check --company company.kofmd --store pub.db")
+    var out = outOf(c)
+    assert(has(out, "Mel Santos"), out)
+    assert(has(out, "schedules    : 4"), out)
+    // the loader does not choke on the identity sections and the github config
+    assert(has(out, "timezone     : America/Sao_Paulo"), out)
+}
+
+test "identity: the material separation and the author's voice reach the prompt" {
+    prepare("id-prompt")
+    var cp = runCmd("cp '" + publisherDir() + "/examples/mel.kofmd' '" + workDir("id-prompt") + "/company.kofmd'")
+    assert(exitOf(cp) == 0, cp)
+    startLm("id-prompt", "11601", "distinct")
+
+    var p = cli("id-prompt", "11601", "plan --company company.kofmd --store pub.db")
+    assert(exitOf(p) == 0, p)
+
+    // the four buckets are separate in the prompt, never merged into one blob
+    assert(promptCount("id-prompt", "FATOS CONHECIDOS") > 0, "facts block missing")
+    assert(promptCount("id-prompt", "OPINIOES REGISTRADAS DA AUTORA") > 0, "opinions block missing")
+    assert(promptCount("id-prompt", "PRINCIPIOS DE ENGENHARIA") > 0, "principles block missing")
+    assert(promptCount("id-prompt", "IDEIAS NOVAS") > 0, "new-ideas rule missing")
+    assert(promptCount("id-prompt", "FONTES DE INFORMACAO") > 0, "sources block missing")
+    // the anti-invention rule is a hard constraint in the prompt
+    assert(promptCount("id-prompt", "NUNCA invente experiencia pessoal") > 0, "authenticity rule missing")
+    // the author's own guide travels with the request (voice, not a template)
+    assert(promptCount("id-prompt", "REGRA DA AUTORA") > 0, "author guide missing")
+    // facts are labelled as facts the source demonstrates, not free invention
+    assert(promptCount("id-prompt", "dentro do que a fonte demonstra") > 0, "fact-source caveat missing")
+    stopLm("id-prompt")
+}
+
+test "identity: a company avoid-rule is enforced by the deterministic validator" {
+    prepare("id-avoid")
+    var company = "# company\nname: Avoid\n\n# topics\ntopics:\n  - engenharia\n\n# opinions\nopinions:\n  - prefere complexidade justificada a complexidade de moda\n\n# avoid\navoid:\n  - sinergia disruptiva\n\n# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\n\n# category morning\nclock: 06:00\nlabel: opiniao\nfunction: contraponto\n\n# editorial\nrequire_material: true\n"
+    File(workDir("id-avoid") + "/company.kofmd").writeText(company)
+    // the fixture emits a text that contains the forbidden phrase: the
+    // deterministic gate must reject it, so no proposal is stored.
+    startLm("id-avoid", "11602", "forbidden")
+
+    // --no-research: the avoid-rule gate is what is under test, not the
+    // online-research step. The slot is contraponto so it draws on the profile's
+    // own material without needing a repo or a live source.
+    var p = cli("id-avoid", "11602", "plan --no-research --company company.kofmd --store pub.db")
+    var out = outOf(p)
+    assert(has(out, "violates company rule avoid"), out)
+    assert(has(out, "DESCARTADO"), out)
+    var rev = cli("id-avoid", "11602", "list --status review --company company.kofmd --store pub.db")
+    assert(has(outOf(rev), "nenhuma"), rev)
+    stopLm("id-avoid")
+}
+
+test "identity: a first-person episode is discarded (the profile holds positions, not episodes)" {
+    prepare("id-episode")
+    var company = "# company\nname: Episode\n\n# topics\ntopics:\n  - engenharia\n\n# opinions\nopinions:\n  - prefere complexidade justificada a complexidade de moda\n\n# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\n\n# category morning\nclock: 06:00\nlabel: opiniao\nfunction: contraponto\n\n# editorial\nrequire_material: true\n"
+    File(workDir("id-episode") + "/company.kofmd").writeText(company)
+    // The fixture narrates a lived episode ("passei a tarde debugando..."). A
+    // contraponto pauta rests on a registered POSITION, which contains no
+    // episode, so the post would be inventing lived experience — exactly what
+    // the profile forbids. The mechanical proxy must refuse it and say why.
+    startLm("id-episode", "11603", "episode")
+
+    var p = cli("id-episode", "11603", "plan --no-research --company company.kofmd --store pub.db")
+    var out = outOf(p)
+    assert(has(out, "narra um episodio em primeira pessoa"), out)
+    assert(has(out, "1 descartada(s) pela validacao"), out)
+    // nothing was approved and nothing was published
+    assert(!has(out, "aprovad"), out)
+    stopLm("id-episode")
+}
+
+test "identity: a claim to have read the source is discarded (only the headline is held)" {
+    prepare("id-readclaim")
+    var company = "# company\nname: ReadClaim\n\n# topics\ntopics:\n  - engenharia\n\n# opinions\nopinions:\n  - prefere complexidade justificada a complexidade de moda\n\n# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\n\n# category morning\nclock: 06:00\nlabel: opiniao\nfunction: contraponto\n\n# editorial\nrequire_material: true\n"
+    File(workDir("id-readclaim") + "/company.kofmd").writeText(company)
+    // The publisher holds the item's title, url, dates and the source's own
+    // blurb — never the article. "Parei pra ler o artigo inteiro" is therefore
+    // a claim it cannot support, whatever the model believes it saw.
+    startLm("id-readclaim", "11604", "readclaim")
+
+    var p = cli("id-readclaim", "11604", "plan --no-research --company company.kofmd --store pub.db")
+    var out = outOf(p)
+    assert(has(out, "afirma ter lido a fonte"), out)
+    assert(has(out, "1 descartada(s) pela validacao"), out)
+    stopLm("id-readclaim")
+}

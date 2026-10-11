@@ -30,6 +30,11 @@ entity Publication {
     error: String
     occurrence_key: String unique
     attempts: Int
+    // Editorial-memory link (pauta -> publicacao). Appended LAST on purpose: the
+    // entity field order IS the constructor order, so appending leaves every
+    // existing call site's positional arguments in the same slot and only adds a
+    // trailing one.
+    topic_id: String
 }
 
 entity Occurrence {
@@ -61,18 +66,190 @@ entity Schedule {
     updated_at: String
 }
 
+// Per-repo knowledge, persisted so GitHub analysis is INCREMENTAL: a repo
+// whose pushed_at did not move is not re-read (no wasted API calls), and its
+// stored digest still feeds the editorial prompt. The verified_* flags record
+// what was actually EXECUTED here — reading a README never sets them
+// (acceptance §2.4: documented != code-found != test-covered != verified).
+entity RepoState {
+    full_name: String unique
+    url: String
+    owner: String
+    is_org: Bool
+    digest: String
+    description: String
+    language: String
+    pushed_at: String
+    analyzed_at: String
+    verified_build: Bool
+    verified_tests: Bool
+    verified_note: String
+    last_error: String
+}
+
+// ---- editorial memory: pautas and the sources behind them ----
+//
+// A TopicRecord is a PAUTA: what was chosen, why, and how it is recognized
+// later. `topic_key` is the normalized slug used for lexical repetition
+// detection; `similarity_hash` is a cheap fingerprint of (theme + argument) so
+// a reworded re-run of the same thesis is at least visible in the record.
+// `status` mirrors the publication lifecycle so retention can tell a finished
+// pauta from a live one.
+entity TopicRecord {
+    id: String unique
+    topic_key: String
+    theme: String
+    argument: String
+    category: String
+    entities: String
+    researched_at: String
+    last_used_at: String
+    similarity_hash: String
+    status: String
+    publication_id: String
+    // Outcome of the two gates, recorded on the PAUTA so a later audit can see
+    // why this topic was kept, flagged or discarded — the reasoning survives,
+    // not just the text. Appended LAST so existing constructor calls keep their
+    // positional arguments.
+    evidence: String
+    validation: String
+    caveat: String
+    related_topics: String
+}
+
+// A source actually CONSULTED while researching a pauta. `published_at` is the
+// date the SOURCE published it; `fetched_at` is when this system read it. Both
+// are stored because "is this still current?" and "when did you read it?" are
+// different questions and the spec requires both.
+//
+// The unique key is `id` = topic_id + "::" + url_key, not `url_key` alone: the
+// same article can legitimately back two different pautas, and a url-only key
+// would silently drop the second citation.
+entity SourceRef {
+    id: String unique
+    topic_id: String
+    url_key: String
+    url: String
+    title: String
+    publisher: String
+    published_at: String
+    fetched_at: String
+    summary: String
+    source_type: String
+}
+
 List<String> daysList(Schedule s) {
     return splitJoined(s.days())
 }
 
+// ---- scalar helpers used by the diagnostics/pruning paths ----
+//
+// Kof's `db.query<T>` maps a result column to the record field of the SAME
+// name, so each single-value probe needs its own record shape.
+
+record StoreCount(Int n)
+record StoreValue(String value)
+record JournalRow(String journal_mode)
+record IntegrityRow(String integrity_check)
+
+// Sum of a file's bytes, 0 when it does not exist. `File` has no size() in this
+// runtime, so the size comes from `stat` (the idiom Service.kf already uses).
+Long fileBytes(String path) {
+    var r = process.run("stat", "-c", "%s", path)
+    if (r.exitCode != 0) {
+        return 0L
+    }
+    var t = r.stdout.trim()
+    if (t == "") {
+        return 0L
+    }
+    var out = 0L
+    var i = 0
+    while (i < t.length) {
+        var c = t.charAt(i)
+        if (c < 48 || c > 57) {
+            return 0L
+        }
+        out = (out * 10L) + ((c - 48) as Long)
+        i = i + 1
+    }
+    return out
+}
+
+// Human-readable size for the diagnostics output.
+String humanBytes(Long b) {
+    if (b < 1024L) {
+        return "" + b + " B"
+    }
+    var kb = b / 1024L
+    if (kb < 1024L) {
+        return "" + kb + " KB"
+    }
+    var mb = kb / 1024L
+    if (mb < 1024L) {
+        return "" + mb + " MB"
+    }
+    return "" + (mb / 1024L) + " GB"
+}
+
+// Outcome of one retention pass. Reported, never silent.
+record PruneReport(
+    Int publicationsRemoved,
+    Int topicsRemoved,
+    Int sourcesRemoved,
+    Int keptLive,
+    Long bytesBefore,
+    Long bytesAfter)
+
 class Store {
     String conn
+    String dbPath
 
     constructor(String path) {
+        dbPath = path
         conn = db.connect("jdbc:sqlite:" + path)
+        // The service writes while a human (or `status`) reads, so WAL is the
+        // right journal mode: readers do not block the writer. It is a
+        // persistent per-database setting, hence set once here rather than at
+        // every use site.
+        //
+        // Through db.query, not db.execute: this pragma ANSWERS with the mode
+        // it settled on, and db.execute rejects any statement that returns
+        // rows ("Query returns results").
+        setJournalMode()
         orm.create<Publication>(conn)
         orm.create<Schedule>(conn)
         orm.create<Occurrence>(conn)
+        orm.create<RepoState>(conn)
+        orm.create<TopicRecord>(conn)
+        orm.create<SourceRef>(conn)
+        migrateSchema()
+    }
+
+    // Schema evolution for databases created BEFORE `publication.topic_id`
+    // existed. `orm.create` is CREATE TABLE IF NOT EXISTS — it never alters an
+    // existing table — so on a legacy file the column has to be added
+    // explicitly, which is exactly what orm.migrate is for.
+    //
+    // The pragma guard is not decoration: on a FRESH database the column is
+    // already there from CREATE TABLE, and orm.migrate would run the ALTER
+    // (its idempotency is by migration NAME, and a fresh file has no record of
+    // it) and abort startup with "duplicate column name".
+    Int migrateSchema() {
+        if (!hasColumn("publication", "topic_id")) {
+            orm.migrate(conn, "001-publication-topic-id", "ALTER TABLE publication ADD COLUMN topic_id VARCHAR(255)")
+        }
+        return 0
+    }
+
+    Bool hasColumn(String table, String column) {
+        var rows = db.query<StoreCount>(conn, "SELECT COUNT(*) AS n FROM pragma_table_info('" + table + "') WHERE name = '" + column + "'")
+        for (var r in rows) {
+            if (r.n() > 0) {
+                return true
+            }
+        }
+        return false
     }
 
     Int close() {
@@ -117,6 +294,27 @@ class Store {
         var i = rows.size() - 1
         while (i >= 0 && out.size() < limit) {
             out.add(rows.get(i).topic() + " || " + rows.get(i).content())
+            i = i - 1
+        }
+        return out
+    }
+
+    // Editorial memory: every draft that is live or was live — review,
+    // approved, scheduled, publishing and published. This is what the
+    // anti-repetition gate compares against, so the four proposals of a
+    // `plan` run (stored as REVIEW, not yet published) still see each other.
+    // `excludeId` skips one publication (the one being reviewed itself).
+    recentEditorialContents(Int limit, String excludeId): List<String> {
+        var rows = orm.all<Publication>(conn)
+        var out = listOf<String>()
+        var i = rows.size() - 1
+        while (i >= 0 && out.size() < limit) {
+            var p = rows.get(i)
+            var live = p.status() == statusPublished() || p.status() == statusApproved()
+                || p.status() == statusScheduled() || p.status() == statusReview() || p.status() == statusPublishing()
+            if (live && p.id() != excludeId) {
+                out.add(p.topic() + " || " + p.content())
+            }
             i = i - 1
         }
         return out
@@ -199,5 +397,255 @@ class Store {
 
     allOccurrences(): List<Occurrence> {
         return orm.all<Occurrence>(conn)
+    }
+
+    // ---- repo knowledge (GitHub source, incremental) ----
+
+    Int saveRepoState(RepoState r) {
+        orm.save(conn, r)
+        return 0
+    }
+
+    findRepoState(String fullName): RepoState? {
+        var v = orm.find<RepoState>(conn, fullName)
+        if (v == null) {
+            return null
+        }
+        return v as RepoState
+    }
+
+    allRepoStates(): List<RepoState> {
+        return orm.all<RepoState>(conn)
+    }
+
+    // ---- editorial memory: pautas ----
+
+    Int saveTopic(TopicRecord t) {
+        orm.save(conn, t)
+        return 0
+    }
+
+    findTopic(String id): TopicRecord? {
+        var v = orm.find<TopicRecord>(conn, id)
+        if (v == null) {
+            return null
+        }
+        return v as TopicRecord
+    }
+
+    allTopics(): List<TopicRecord> {
+        return orm.all<TopicRecord>(conn)
+    }
+
+    topicsByCategory(String category): List<TopicRecord> {
+        return orm.where<TopicRecord>(conn, "category", category)
+    }
+
+    // Newest-first by insertion order (orm.all has no ORDER BY, so the reverse
+    // index walk is what "recent" means here — same convention as the
+    // publication helpers above).
+    recentTopicRecords(Int limit): List<TopicRecord> {
+        var rows = orm.all<TopicRecord>(conn)
+        var out = listOf<TopicRecord>()
+        var i = rows.size() - 1
+        while (i >= 0 && out.size() < limit) {
+            out.add(rows.get(i))
+            i = i - 1
+        }
+        return out
+    }
+
+    // Pautas that are live: still in review/approved/scheduled/publishing, or
+    // already published but recent enough to matter for repetition detection.
+    recentTopicThemes(Int limit): List<String> {
+        var rows = orm.all<TopicRecord>(conn)
+        var out = listOf<String>()
+        var i = rows.size() - 1
+        while (i >= 0 && out.size() < limit) {
+            var t = rows.get(i)
+            if (t.theme() != "") {
+                out.add(t.theme() + " || " + t.argument())
+            }
+            i = i - 1
+        }
+        return out
+    }
+
+    Int deleteTopic(String id): Bool {
+        return orm.delete<TopicRecord>(conn, id)
+    }
+
+    // ---- editorial memory: sources ----
+
+    Int saveSource(SourceRef s) {
+        orm.save(conn, s)
+        return 0
+    }
+
+    findSource(String id): SourceRef? {
+        var v = orm.find<SourceRef>(conn, id)
+        if (v == null) {
+            return null
+        }
+        return v as SourceRef
+    }
+
+    sourcesByTopic(String topicId): List<SourceRef> {
+        return orm.where<SourceRef>(conn, "topic_id", topicId)
+    }
+
+    allSources(): List<SourceRef> {
+        return orm.all<SourceRef>(conn)
+    }
+
+    Int deleteSource(String id): Bool {
+        return orm.delete<SourceRef>(conn, id)
+    }
+
+    // ---- size accounting, integrity and vacuum ----
+
+    // Total on-disk footprint. WAL is the journal mode (set in the
+    // constructor), so the honest number is the database PLUS its sidecar
+    // files: a `-wal` holding the recent writes is still data on the disk, and
+    // counting only the .db would understate usage exactly when it matters.
+    // The sidecars are counted whether or not they currently exist, so the
+    // figure stays right if the mode is ever changed back.
+    Long dbSizeBytes() {
+        return fileBytes(dbPath) + fileBytes(dbPath + "-wal") + fileBytes(dbPath + "-shm")
+    }
+
+    // Idempotent: SQLite ignores it when the database is already in WAL.
+    Int setJournalMode() {
+        db.query<JournalRow>(conn, "PRAGMA journal_mode=WAL")
+        return 0
+    }
+
+    String journalMode() {
+        var rows = db.query<JournalRow>(conn, "PRAGMA journal_mode")
+        for (var r in rows) {
+            return r.journal_mode()
+        }
+        return "unknown"
+    }
+
+    String integrityCheck() {
+        var rows = db.query<IntegrityRow>(conn, "PRAGMA integrity_check")
+        for (var r in rows) {
+            return r.integrity_check()
+        }
+        return "unknown"
+    }
+
+    Int vacuum() {
+        db.execute(conn, "VACUUM")
+        return 0
+    }
+
+    Int countTable(String table) {
+        var rows = db.query<StoreCount>(conn, "SELECT COUNT(*) AS n FROM " + table)
+        for (var r in rows) {
+            return r.n()
+        }
+        return 0
+    }
+
+    // ---- retention ----
+
+    // A publication is LIVE when a human or the scheduler may still act on it.
+    // Live rows are NEVER pruned: deleting something awaiting review would
+    // destroy work, and deleting an approved-but-unpublished row would silently
+    // cancel a decision someone already made.
+    Bool publicationIsLive(Publication p) {
+        var s = p.status()
+        return s == statusReview() || s == statusApproved() || s == statusScheduled() || s == statusPublishing()
+    }
+
+    // A pauta is live when its PUBLICATION is live. Deriving it from the
+    // publication (rather than trusting a status stored on the topic) is what
+    // keeps the two in step: the topic's own status is written once, at
+    // creation, and nothing would ever move it when the draft is later
+    // rejected or published. Without this, every pauta would look live forever
+    // and retention could never trim a single one.
+    Bool topicIsLive(TopicRecord t) {
+        if (t.publication_id() == "") {
+            return true
+        }
+        var p = findPublication(t.publication_id())
+        if (p == null) {
+            // its publication is already gone: nothing to protect
+            return false
+        }
+        return publicationIsLive(p)
+    }
+
+    // Controlled retention. `limit` caps PUBLICATIONS + TOPICS (the editorial
+    // records); sources follow their pauta. Only terminal records are removed,
+    // oldest first, and only while the total is above the limit — so a database
+    // that is under the limit is untouched, and a database full of live records
+    // is left alone and reported as such rather than force-trimmed.
+    //
+    // Nothing here runs VACUUM: freeing pages is a separate, explicitly
+    // requested step (`db-prune --vacuum`), because VACUUM rewrites the whole
+    // file and should not happen as a side effect of a routine pass.
+    PruneReport pruneByCount(Int limit) {
+        var before = dbSizeBytes()
+        var pubs = orm.all<Publication>(conn)
+        var topics = orm.all<TopicRecord>(conn)
+        var total = pubs.size() + topics.size()
+
+        var pubsRemoved = 0
+        var topicsRemoved = 0
+        var keptLive = 0
+        for (var p in pubs) {
+            if (publicationIsLive(p)) {
+                keptLive = keptLive + 1
+            }
+        }
+
+        if (total > limit) {
+            // oldest-first: index order is insertion order
+            var need = total - limit
+            var i = 0
+            while (i < pubs.size() && need > 0) {
+                var p = pubs.get(i)
+                if (!publicationIsLive(p)) {
+                    orm.delete<Publication>(conn, p.id())
+                    pubsRemoved = pubsRemoved + 1
+                    need = need - 1
+                }
+                i = i + 1
+            }
+            i = 0
+            while (i < topics.size() && need > 0) {
+                var t = topics.get(i)
+                if (!topicIsLive(t)) {
+                    orm.delete<TopicRecord>(conn, t.id())
+                    topicsRemoved = topicsRemoved + 1
+                    need = need - 1
+                }
+                i = i + 1
+            }
+        }
+
+        // Sources whose pauta no longer exists are orphans: they can never be
+        // cited again and they are pure weight.
+        var sourcesRemoved = 0
+        for (var s in orm.all<SourceRef>(conn)) {
+            if (s.topic_id() == "" || findTopic(s.topic_id()) == null) {
+                orm.delete<SourceRef>(conn, s.id())
+                sourcesRemoved = sourcesRemoved + 1
+            }
+        }
+
+        return PruneReport(pubsRemoved, topicsRemoved, sourcesRemoved, keptLive, before, dbSizeBytes())
+    }
+
+    // The 20 GB ceiling is a SAFETY VALVE, not a target. Reaching it means
+    // something is wrong upstream (a runaway loop, a broken retention policy),
+    // so the response is to STOP WRITING and say so — never to start deleting
+    // in bulk to make room. The caller decides what to refuse; this only
+    // answers the question.
+    Bool writesBlocked(Long capBytes) {
+        return dbSizeBytes() >= capBytes
     }
 }

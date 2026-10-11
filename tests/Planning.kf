@@ -1,0 +1,375 @@
+// E2E: topic planning — candidates, transparent scoring, and the four
+// editorial functions.
+//
+// What this suite proves:
+//   - the `function:` of a category decides WHICH evidence a slot may use
+//     (a news slot is not fed a registered opinion and vice versa)
+//   - an unfillable slot is LEFT EMPTY with a stated reason, and the command
+//     does not manufacture a topic to fill the time
+//   - scoring is deterministic and its components are printed
+//   - the pauta behind each proposal is persisted, with its sources and dates
+//   - a project slot with no analysed repo activity skips honestly
+//   - the same topic is not offered to two slots in the same run
+
+String envOr(String key, String dflt) {
+    var v = config.env(key)
+    if (v != null && v != "") {
+        return v
+    }
+    return dflt
+}
+
+String publisherDir() {
+    return envOr("KOF_PUBLISHER_DIR", "/home/mel/Documentos/kof-publisher")
+}
+
+String classpath() {
+    var home = envOr("HOME", "/home/mel")
+    var drv = envOr("KOF_SQLITE_JAR", home + "/.kof/deps/org/xerial/sqlite-jdbc/3.53.4.0/sqlite-jdbc-3.53.4.0.jar")
+    return envOr("KOF_PUBLISHER_CLASSES", publisherDir() + "/build/classes")
+        + ":" + home + "/.local/share/kof/lib/kof.jar:" + drv
+}
+
+String workDir(String name) {
+    return "/tmp/kof-pub-tests/" + name
+}
+
+void prepare(String name) {
+    var r = process.run("sh", "-c", "rm -rf '" + workDir(name) + "' && mkdir -p '" + workDir(name) + "/home'")
+    assert(r.exitCode == 0, "prepare " + name + ": " + r.stderr)
+}
+
+String runCmd(String cmd) {
+    var r = process.run("sh", "-c", cmd + " 2>&1")
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+Int exitOf(String blob) {
+    var i = blob.indexOf("||EXIT=")
+    if (i < 0) {
+        throw "no exit marker"
+    }
+    return blob.substring(i + 7).toInt()
+}
+
+String outOf(String blob) {
+    var i = blob.indexOf("||EXIT=")
+    return blob.substring(0, i)
+}
+
+Bool has(String hay, String needle) {
+    return hay.indexOf(needle) >= 0
+}
+
+// First "pub-..." token in a blob of text. Plain character scanning (Kof has
+// no regex in this runtime), enough for the plan's "id: pub-..." lines.
+String firstIdIn(String blob) {
+    var marker = "id: pub-"
+    var at = blob.indexOf(marker)
+    if (at < 0) {
+        return ""
+    }
+    var start = at + 4
+    var end = start
+    while (end < blob.length) {
+        var c = blob.charAt(end)
+        var okChar = (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 45
+        if (!okChar) {
+            break
+        }
+        end = end + 1
+    }
+    return blob.substring(start, end)
+}
+
+String startResearch(String name, String port, String mode) {
+    runCmd("pkill -f 'fake_researc[h].py " + port + "' || true; true")
+    var up = runCmd("{ python3 '" + publisherDir() + "/tests/fake_research.py' " + port + " " + mode + " > '" + workDir(name) + "/rs.log' 2>&1 & echo $! > '" + workDir(name) + "/rs.pid'; }; sleep 1; curl -s -m 4 http://127.0.0.1:" + port + "/health")
+    assert(exitOf(up) == 0 && outOf(up).trim() == "ok", up)
+    return outOf(up)
+}
+
+void stopResearch(String name) {
+    runCmd("kill $(cat '" + workDir(name) + "/rs.pid') 2>/dev/null || true")
+}
+
+String startLm(String name, String port) {
+    runCmd("pkill -f 'fake_lm_persona[l].py " + port + "' || true; true")
+    var up = runCmd("cd '" + workDir(name) + "' && { python3 '" + publisherDir() + "/tests/fake_lm_personal.py' " + port + " distinct > lm.log 2>&1 & echo $! > lm.pid; }; sleep 1; curl -s -m 4 http://127.0.0.1:" + port + "/api/tags | grep -c models")
+    assert(exitOf(up) == 0, up)
+    return outOf(up)
+}
+
+void stopLm(String name) {
+    runCmd("kill $(cat '" + workDir(name) + "/lm.pid') 2>/dev/null || true")
+}
+
+// Full pipeline: research fixture + LM fixture, pointed at via env.
+String cliPlan(String name, String rsPort, String lmPort, String args) {
+    var base = "http://127.0.0.1:" + rsPort
+    var cmd = "cd '" + workDir(name) + "' && KOF_PUBLISHER_HOME='" + workDir(name) + "/home'"
+        + " KOF_RESEARCH_HN_API='" + base + "/hn'"
+        + " KOF_RESEARCH_DEVTO_API='" + base + "/devto'"
+        + " KOF_RESEARCH_LOBSTERS_API='" + base + "/lobsters'"
+        + " KOF_RESEARCH_TIMEOUT=10"
+        + " KOF_LM_URL=http://127.0.0.1:" + lmPort + " KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25"
+        + " java -cp '" + classpath() + "' Default.Main " + args + " 2>&1"
+    var r = process.run("sh", "-c", cmd)
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+// A profile with all four functions declared, enough opinions for the
+// opinion-backed slots, and NO github source (so the project slot has no
+// analysed repo unless the test seeds one).
+String planCompany() {
+    var c = "# company\nname: Mel Santos\n\n# topics\ntopics:\n  - engenharia de software\n  - Java e o ecossistema JVM\n  - linguagens de programacao e compiladores\n\n"
+    c = c + "# opinions\nopinions:\n"
+    c = c + "  - usa IA no dia a dia como ferramenta e gosta, mas detesta hype e caixa preta\n"
+    c = c + "  - prefere complexidade justificada a complexidade de moda\n"
+    c = c + "  - desconfia de metrica de produtividade que mede atividade em vez de resultado\n\n"
+    c = c + "# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\ntarget: linkedin\n\n"
+    c = c + "# editorial\nrequire_material: true\nresearch:\n  - hackernews\n  - devto\nresearch_max_age_hours: 168\nretention_records: 10000\nretention_max_gb: 20\n\n"
+    c = c + "# category morning\nclock: 06:00\nlabel: trabalho real\nfunction: projetos\nangle: o que mudou no projeto\n\n"
+    c = c + "# category noon\nclock: 12:00\nlabel: noticia\nfunction: noticias\nangle: noticia recente\n\n"
+    c = c + "# category afternoon\nclock: 15:00\nlabel: contraponto\nfunction: contraponto\nangle: discorde do hype\n\n"
+    c = c + "# category night\nclock: 18:00\nlabel: observacao\nfunction: observacao\nangle: observacao sobre engenharia\n"
+    return c
+}
+
+void writeCompany(String name) {
+    File(workDir(name) + "/company.kofmd").writeText(planCompany())
+}
+
+test "plan: a slot with no evidence is skipped with a reason, not filled with invention" {
+    prepare("pl-skip")
+    writeCompany("pl-skip")
+    startResearch("pl-skip", "11990", "normal")
+    startLm("pl-skip", "11991")
+
+    var p = cliPlan("pl-skip", "11990", "11991", "plan --company company.kofmd --store pub.db")
+    assert(exitOf(p) == 0, p)
+    var out = outOf(p)
+    // no repo was ever analysed, so the projects slot must skip
+    assert(has(out, "[trabalho real e projetos]  -> SKIP ----"), out)
+    assert(has(out, "nenhum projeto com atividade recente analisada"), out)
+    // and the summary counts it as a skip, not as a proposal
+    assert(has(out, "horario(s) sem material"), out)
+    stopLm("pl-skip")
+    stopResearch("pl-skip")
+}
+
+test "plan: the news slot uses a real consulted story with url, dates and score breakdown" {
+    prepare("pl-news")
+    writeCompany("pl-news")
+    startResearch("pl-news", "11992", "normal")
+    startLm("pl-news", "11993")
+
+    var p = cliPlan("pl-news", "11992", "11993", "plan --company company.kofmd --store pub.db")
+    assert(exitOf(p) == 0, p)
+    var out = outOf(p)
+    assert(has(out, "[noticia de tecnologia] ----"), out)
+    assert(has(out, "origem: research"), out)
+    assert(has(out, "pontuacao: "), out)
+    assert(has(out, "atualidade="), out)
+    assert(has(out, "evidencia=25 (fonte externa com URL)"), out)
+    assert(has(out, "relevancia="), out)
+    assert(has(out, "originalidade="), out)
+    assert(has(out, "publicado_em="), out)
+    assert(has(out, "consultado_em="), out)
+    stopLm("pl-news")
+    stopResearch("pl-news")
+}
+
+test "plan: the opinion slots draw on registered opinions, never on a third-party story" {
+    prepare("pl-opinion")
+    writeCompany("pl-opinion")
+    startResearch("pl-opinion", "11994", "normal")
+    startLm("pl-opinion", "11995")
+
+    var p = cliPlan("pl-opinion", "11994", "11995", "plan --company company.kofmd --store pub.db")
+    assert(exitOf(p) == 0, p)
+    var out = outOf(p)
+    assert(has(out, "[contraponto tecnico (anti-hype)]"), out)
+    assert(has(out, "origem: profile"), out)
+    assert(has(out, "opiniao registrada no perfil"), out)
+    stopLm("pl-opinion")
+    stopResearch("pl-opinion")
+}
+
+test "plan: each proposal persists a pauta with its sources and both dates" {
+    prepare("pl-persist")
+    writeCompany("pl-persist")
+    startResearch("pl-persist", "11996", "normal")
+    startLm("pl-persist", "11997")
+
+    var p = cliPlan("pl-persist", "11996", "11997", "plan --company company.kofmd --store pub.db")
+    assert(exitOf(p) == 0, p)
+    var out = outOf(p)
+    assert(has(out, "pauta: top-"), out)
+
+    // db-stats must now show pautas and fontes (the memory is real, not
+    // implied). Three proposals, not four: the projects slot has no analysed
+    // repo and skips, which is the behaviour the first test pins down.
+    var st = cliPlan("pl-persist", "11996", "11997", "db-stats --company company.kofmd --store pub.db")
+    var stOut = outOf(st)
+    assert(has(stOut, "pautas       : 3"), stOut)
+    assert(has(stOut, "fontes       : 1"), stOut)
+    assert(has(stOut, "publicacoes  : 3"), stOut)
+    stopLm("pl-persist")
+    stopResearch("pl-persist")
+}
+
+test "plan: review shows the pauta, its argument, its sources and the factual gate" {
+    prepare("pl-review")
+    writeCompany("pl-review")
+    startResearch("pl-review", "11998", "normal")
+    startLm("pl-review", "11999")
+
+    var p = cliPlan("pl-review", "11998", "11999", "plan --company company.kofmd --store pub.db")
+    assert(exitOf(p) == 0, p)
+    // The plan prints "id: pub-<clock>-<name>-<rand>" for each proposal; take
+    // the first one. Reading it from the plan output keeps the test on the
+    // same invocation instead of depending on a second CLI round-trip.
+    var id = firstIdIn(outOf(p))
+    assert(id != "", p)
+
+    var rv = cliPlan("pl-review", "11998", "11999", "review " + id + " --company company.kofmd --store pub.db")
+    assert(exitOf(rv) == 0, rv)
+    var out = outOf(rv)
+    assert(has(out, "---- pauta ----"), out)
+    assert(has(out, "funcao    :"), out)
+    assert(has(out, "argumento :"), out)
+    assert(has(out, "evidencia :"), out)
+    assert(has(out, "---- fontes ("), out)
+    assert(has(out, "publicado  :"), out)
+    assert(has(out, "consultado :"), out)
+    assert(has(out, "---- validacao editorial ----"), out)
+    assert(has(out, "---- validacao factual (proxy mecanico) ----"), out)
+    assert(has(out, "LIMITE: este check e um proxy mecanico"), out)
+    stopLm("pl-review")
+    stopResearch("pl-review")
+}
+
+test "plan: when every source fails, the news slot skips and says so (nothing invented)" {
+    prepare("pl-offline")
+    writeCompany("pl-offline")
+    startResearch("pl-offline", "12001", "offline")
+    startLm("pl-offline", "12002")
+
+    var p = cliPlan("pl-offline", "12001", "12002", "plan --company company.kofmd --store pub.db")
+    assert(exitOf(p) == 0, p)
+    var out = outOf(p)
+    assert(has(out, "nenhuma fonte respondeu"), out)
+    assert(has(out, "nada inventado"), out)
+    stopLm("pl-offline")
+    stopResearch("pl-offline")
+}
+
+test "plan: --no-research skips the network entirely and still plans the opinion slots" {
+    prepare("pl-noresearch")
+    writeCompany("pl-noresearch")
+    startLm("pl-noresearch", "12003")
+
+    var p = cliPlan("pl-noresearch", "12004", "12003", "plan --no-research --company company.kofmd --store pub.db")
+    assert(exitOf(p) == 0, p)
+    var out = outOf(p)
+    // no research banner at all
+    assert(!has(out, "Pesquisando fontes atuais"), out)
+    // the opinion slots still work; the news slot skips for lack of material
+    assert(has(out, "origem: profile"), out)
+    stopLm("pl-noresearch")
+}
+
+// ---- integration ----
+//
+// One end-to-end run of the whole pipeline with ALL FOUR editorial functions
+// backed by real material at once:
+//
+//   research  (fixture HN/dev.to)  -> the news slot
+//   github    (fixture REST)       -> the projects slot
+//   profile   (registered opinions)-> contraponto + observacao
+//
+// It asserts the full audit trail is persisted: four proposals in REVIEW, four
+// pautas, the consulted sources with BOTH dates, and nothing published. This is
+// the test that would catch a break in the seams between the stages.
+
+String startGithubFixture(String name, String port, String mode) {
+    runCmd("pkill -f 'fake_githu[b].py " + port + "' || true; true")
+    var up = runCmd("{ python3 '" + publisherDir() + "/tests/fake_github.py' " + port + " " + mode + " > '" + workDir(name) + "/gh.log' 2>&1 & echo $! > '" + workDir(name) + "/gh.pid'; }; sleep 1; curl -s -m 4 http://127.0.0.1:" + port + "/health")
+    assert(exitOf(up) == 0 && outOf(up).trim() == "ok", up)
+    return outOf(up)
+}
+
+void stopGithubFixture(String name) {
+    runCmd("kill $(cat '" + workDir(name) + "/gh.pid') 2>/dev/null || true")
+}
+
+String integrationCompany() {
+    var c = "# company\nname: Mel Santos\n\n# topics\ntopics:\n  - engenharia de software\n  - Java e o ecossistema JVM\n\n# opinions\nopinions:\n"
+    c = c + "  - prefere complexidade justificada a complexidade de moda\n"
+    c = c + "  - desconfia de metrica de produtividade que mede atividade em vez de resultado\n\n"
+    c = c + "# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\ntarget: linkedin\n\n"
+    c = c + "# editorial\nrequire_material: true\nresearch:\n  - hackernews\n  - devto\nresearch_max_age_hours: 168\nretention_records: 10000\nretention_max_gb: 20\n\n"
+    c = c + "# github\naccount: melmonfre\nenabled: true\norgs:\n  - KofLang\n\n"
+    c = c + "# category morning\nclock: 06:00\nlabel: trabalho real\nfunction: projetos\nangle: o que mudou no projeto\n\n"
+    c = c + "# category noon\nclock: 12:00\nlabel: noticia\nfunction: noticias\nangle: noticia recente\n\n"
+    c = c + "# category afternoon\nclock: 15:00\nlabel: contraponto\nfunction: contraponto\nangle: discorde do hype\n\n"
+    c = c + "# category night\nclock: 18:00\nlabel: observacao\nfunction: observacao\nangle: observacao sobre engenharia\n"
+    return c
+}
+
+test "integration: research + github + profile fill all four functions into REVIEW" {
+    prepare("pl-integ")
+    File(workDir("pl-integ") + "/company.kofmd").writeText(integrationCompany())
+    startGithubFixture("pl-integ", "12010", "normal")
+    startResearch("pl-integ", "12011", "normal")
+    startLm("pl-integ", "12012")
+
+    // 1. the read-only GitHub analysis persists the repo digests the projects
+    //    slot will draw on (its own command, no publish path involved)
+    var g = runCmd("cd '" + workDir("pl-integ") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-integ") + "/home' KOF_GITHUB_API=http://127.0.0.1:12010 java -cp '" + classpath() + "' Default.Main github --limit 10 --company company.kofmd --store pub.db")
+    assert(exitOf(g) == 0, g)
+    stopGithubFixture("pl-integ")
+
+    // 2. the full plan: research -> candidates -> score -> generate -> validate
+    var base = "http://127.0.0.1:12011"
+    var cmd = "cd '" + workDir("pl-integ") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-integ") + "/home'"
+        + " KOF_RESEARCH_HN_API='" + base + "/hn' KOF_RESEARCH_DEVTO_API='" + base + "/devto' KOF_RESEARCH_TIMEOUT=10"
+        + " KOF_LM_URL=http://127.0.0.1:12012 KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25"
+        + " java -cp '" + classpath() + "' Default.Main plan --company company.kofmd --store pub.db 2>&1"
+    var p = runCmd(cmd)
+    assert(exitOf(p) == 0, p)
+    var out = outOf(p)
+
+    // all four functions produced a proposal
+    assert(has(out, "[trabalho real e projetos] ----"), out)
+    assert(has(out, "[noticia de tecnologia] ----"), out)
+    assert(has(out, "[contraponto tecnico (anti-hype)] ----"), out)
+    assert(has(out, "[observacao, humor e reflexao] ----"), out)
+    assert(has(out, "4 proposta(s) em REVIEW"), out)
+    assert(has(out, "Nada foi publicado"), out)
+    // the projects slot used the REAL repo analysis, the news slot a REAL source
+    assert(has(out, "origem: repo"), out)
+    assert(has(out, "origem: research"), out)
+    assert(has(out, "origem: profile"), out)
+
+    // 3. the memory is persisted: 4 pautas, the consulted sources with both
+    //    dates, and nothing in published
+    var st = runCmd("cd '" + workDir("pl-integ") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-integ") + "/home' java -cp '" + classpath() + "' Default.Main db-stats --company company.kofmd --store pub.db 2>&1")
+    var stOut = outOf(st)
+    assert(has(stOut, "pautas       : 4"), stOut)
+    assert(has(stOut, "published  : 0"), stOut)
+    assert(has(stOut, "fontes       : 1"), stOut)
+
+    // 4. reviewing any proposal shows its pauta, its sources and both gates
+    var id = firstIdIn(out)
+    assert(id != "", out)
+    var rv = runCmd("cd '" + workDir("pl-integ") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-integ") + "/home' java -cp '" + classpath() + "' Default.Main review " + id + " --company company.kofmd --store pub.db 2>&1")
+    var rvOut = outOf(rv)
+    assert(has(rvOut, "---- pauta ----"), rvOut)
+    assert(has(rvOut, "---- validacao editorial ----"), rvOut)
+    assert(has(rvOut, "---- validacao factual (proxy mecanico) ----"), rvOut)
+
+    stopLm("pl-integ")
+    stopResearch("pl-integ")
+}

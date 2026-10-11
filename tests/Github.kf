@@ -1,0 +1,376 @@
+// E2E: the GitHub knowledge source (§2) — read-only discovery and analysis of
+// the author's PUBLIC projects against a controlled HTTP fixture. Nothing here
+// touches the real GitHub, and nothing publishes to LinkedIn.
+//
+// The suite proves the acceptance points that matter:
+//   §2.1 the account is CONFIRMED personal with evidence (org / unknown /
+//        non-contributor logins are refused, never assumed)
+//   §2.4 documented != code-found != verified — the digest keeps them apart
+//   §2.7 analysis is INCREMENTAL (an unchanged repo is served from cache)
+//   §2.9 a credential leaked in public content is sanitized, never stored
+//   §4   the persisted digest reaches the editorial prompt as sourced material
+
+String envOr(String key, String dflt) {
+    var v = config.env(key)
+    if (v != null && v != "") {
+        return v
+    }
+    return dflt
+}
+
+String publisherDir() {
+    return envOr("KOF_PUBLISHER_DIR", "/home/mel/Documentos/kof-publisher")
+}
+
+String classpath() {
+    var home = envOr("HOME", "/home/mel")
+    var drv = envOr("KOF_SQLITE_JAR", home + "/.kof/deps/org/xerial/sqlite-jdbc/3.53.4.0/sqlite-jdbc-3.53.4.0.jar")
+    return envOr("KOF_PUBLISHER_CLASSES", publisherDir() + "/build/classes")
+        + ":" + home + "/.local/share/kof/lib/kof.jar:" + drv
+}
+
+String workDir(String name) {
+    return "/tmp/kof-pub-tests/" + name
+}
+
+void prepare(String name) {
+    var r = process.run("sh", "-c", "rm -rf '" + workDir(name) + "' && mkdir -p '" + workDir(name) + "/home'")
+    assert(r.exitCode == 0, "prepare " + name + ": " + r.stderr)
+}
+
+String runCmd(String cmd) {
+    var r = process.run("sh", "-c", cmd + " 2>&1")
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+Int exitOf(String blob) {
+    var i = blob.indexOf("||EXIT=")
+    if (i < 0) {
+        throw "no exit marker"
+    }
+    return blob.substring(i + 7).toInt()
+}
+
+String outOf(String blob) {
+    var i = blob.indexOf("||EXIT=")
+    return blob.substring(0, i)
+}
+
+Bool has(String hay, String needle) {
+    return hay.indexOf(needle) >= 0
+}
+
+String cli(String name, String port, String args) {
+    var cmd = "cd '" + workDir(name) + "' && KOF_PUBLISHER_HOME='" + workDir(name) + "/home' KOF_GITHUB_API=http://127.0.0.1:" + port
+        + " java -cp '" + classpath() + "' Default.Main " + args + " 2>&1"
+    var r = process.run("sh", "-c", cmd)
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+String startGithub(String name, String port, String mode) {
+    runCmd("pkill -f 'fake_githu[b].py " + port + "' || true; true")
+    var up = runCmd("{ python3 '" + publisherDir() + "/tests/fake_github.py' " + port + " " + mode + " > '" + workDir(name) + "/gh.log' 2>&1 & echo $! > '" + workDir(name) + "/gh.pid'; }; sleep 1; curl -s -m 4 http://127.0.0.1:" + port + "/health")
+    assert(exitOf(up) == 0 && outOf(up).trim() == "ok", up)
+    return outOf(up)
+}
+
+void stopGithub(String name) {
+    runCmd("kill $(cat '" + workDir(name) + "/gh.pid') 2>/dev/null || true")
+}
+
+// A company declaring the GitHub source, with enough material for `plan`.
+String githubCompany(String account, Bool enabled) {
+    var c = "# company\nname: Mel Santos\n\n# topics\ntopics:\n  - engenharia de software\n  - Java\n\n"
+    c = c + "# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\ntarget: linkedin\n\n"
+    c = c + "# editorial\nrequire_material: true\n\n"
+    c = c + "# github\naccount: " + account + "\nenabled: " + enabled + "\norgs:\n  - KofLang\n\n"
+    c = c + "# category morning\nclock: 06:00\nlabel: opiniao\nangle: uma tese propria\n"
+    return c
+}
+
+void writeCompany(String name, String account, Bool enabled) {
+    File(workDir(name) + "/company.kofmd").writeText(githubCompany(account, enabled))
+}
+
+test "github: confirms the personal account, analyzes own+org repos, ignores forks, caches" {
+    prepare("gh-normal")
+    writeCompany("gh-normal", "melmonfre", true)
+    startGithub("gh-normal", "11901", "normal")
+
+    var g = cli("gh-normal", "11901", "github --limit 10 --company company.kofmd --store pub.db")
+    assert(exitOf(g) == 0, g)
+    var out = outOf(g)
+    assert(has(out, "autor confirmado"), out)
+    assert(has(out, "melmonfre/kof-publisher"), out)
+    assert(has(out, "melmonfre/kof-lang"), out)
+    assert(has(out, "KofLang/kof4j"), out)
+    assert(has(out, "1 fork(s) ignorado"), out)
+    assert(has(out, "verificado_aqui=false"), out)
+
+    // incremental: a second run re-reads nothing, it serves the cache.
+    var g2 = cli("gh-normal", "11901", "github --limit 10 --company company.kofmd --store pub.db")
+    assert(exitOf(g2) == 0, g2)
+    assert(has(outOf(g2), "sem mudanca"), outOf(g2))
+    assert(has(outOf(g2), "0 analisado(s) agora"), outOf(g2))
+
+    // --show exposes the persisted digest, with the claim levels kept apart.
+    var show = cli("gh-normal", "11901", "github --show --company company.kofmd --store pub.db")
+    assert(exitOf(show) == 0, show)
+    var s = outOf(show)
+    assert(has(s, "[documentado]"), s)
+    assert(has(s, "[encontrado no codigo]"), s)
+    assert(has(s, "[nao verificado]"), s)
+    stopGithub("gh-normal")
+}
+
+test "github: refuses an organization login (an org is not the author)" {
+    prepare("gh-org")
+    writeCompany("gh-org", "melmonfre", true)
+    startGithub("gh-org", "11902", "org")
+
+    var g = cli("gh-org", "11902", "github --company company.kofmd --store pub.db")
+    assert(exitOf(g) != 0, g)
+    assert(has(outOf(g), "nao e conta pessoal"), outOf(g))
+    assert(has(outOf(g), "NAO confirmada"), outOf(g))
+    stopGithub("gh-org")
+}
+
+test "github: unconfirmed when the login is unknown or never a contributor" {
+    prepare("gh-unknown")
+    writeCompany("gh-unknown", "melmonfre", true)
+    startGithub("gh-unknown", "11903", "unknown")
+    var g = cli("gh-unknown", "11903", "github --company company.kofmd --store pub.db")
+    assert(exitOf(g) != 0, g)
+    assert(has(outOf(g), "nao respondeu na API"), outOf(g))
+    stopGithub("gh-unknown")
+
+    prepare("gh-noncontrib")
+    writeCompany("gh-noncontrib", "melmonfre", true)
+    startGithub("gh-noncontrib", "11904", "noncontrib")
+    var g2 = cli("gh-noncontrib", "11904", "github --company company.kofmd --store pub.db")
+    assert(exitOf(g2) != 0, g2)
+    assert(has(outOf(g2), "nao aparece como contribuidor"), outOf(g2))
+    stopGithub("gh-noncontrib")
+
+    // a real User with zero public repos: honest empty, still not confirmed
+    prepare("gh-empty")
+    writeCompany("gh-empty", "melmonfre", true)
+    startGithub("gh-empty", "11909", "empty")
+    var g3 = cli("gh-empty", "11909", "github --company company.kofmd --store pub.db")
+    assert(exitOf(g3) != 0, g3)
+    assert(has(outOf(g3), "nao tem repositorio publico"), outOf(g3))
+    stopGithub("gh-empty")
+}
+
+test "github: an API failure is reported honestly, nothing is invented" {
+    prepare("gh-fail")
+    writeCompany("gh-fail", "melmonfre", true)
+    startGithub("gh-fail", "11905", "fail")
+
+    var g = cli("gh-fail", "11905", "github --company company.kofmd --store pub.db")
+    assert(exitOf(g) != 0, g)
+    // a failed listing must NOT be misread as "this account owns nothing":
+    // the honest cause (the API error) is surfaced, not a fabricated empty set
+    assert(has(outOf(g), "nao foi possivel listar os repositorios"), outOf(g))
+    assert(has(outOf(g), "HTTP 500"), outOf(g))
+    // and nothing was analyzed or persisted from a failed read
+    assert(!has(outOf(g), "PROJETO "), outOf(g))
+    assert(!has(outOf(g), "+ melmonfre/"), outOf(g))
+    stopGithub("gh-fail")
+}
+
+test "github: a credential leaked in public content is sanitized, never stored" {
+    prepare("gh-secret")
+    writeCompany("gh-secret", "melmonfre", true)
+    startGithub("gh-secret", "11906", "normal")
+
+    var g = cli("gh-secret", "11906", "github --limit 10 --company company.kofmd --store pub.db")
+    assert(exitOf(g) == 0, g)
+    // --show is a pure read of the persisted (already sanitized) knowledge
+    var show = cli("gh-secret", "11906", "github --show --company company.kofmd --store pub.db")
+    assert(exitOf(show) == 0, show)
+    var out = outOf(g) + outOf(show)
+    // The fixture's README carries a fake PAT and a fake password assignment.
+    // Neither may survive into what the publisher keeps or prints.
+    assert(!has(out, "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ"), "fake PAT leaked:\n" + out)
+    assert(!has(out, "hunter2"), "fake password leaked:\n" + out)
+    // ...and the legitimate documentation SURVIVES (guards against the
+    // over-redaction bug BUG-14, where secrets.redact blanked the middle of
+    // every string)
+    assert(has(outOf(show), "Publica no LinkedIn a partir de um perfil editorial"), "legit doc was over-redacted:\n" + outOf(show))
+    assert(has(outOf(show), "kof-publisher"), outOf(show))
+    stopGithub("gh-secret")
+}
+
+test "github: the persisted digest reaches the editorial prompt as sourced material" {
+    prepare("gh-prompt")
+    writeCompany("gh-prompt", "melmonfre", true)
+    startGithub("gh-prompt", "11907", "normal")
+
+    var g = cli("gh-prompt", "11907", "github --limit 10 --company company.kofmd --store pub.db")
+    assert(exitOf(g) == 0, g)
+    stopGithub("gh-prompt")
+
+    // fake LM (distinct mode) started from the work dir so prompts.log lands there
+    runCmd("pkill -f 'fake_lm_persona[l].py 11908' || true; true")
+    var up = runCmd("cd '" + workDir("gh-prompt") + "' && { python3 '" + publisherDir() + "/tests/fake_lm_personal.py' 11908 distinct > lm.log 2>&1 & echo $! > lm.pid; }; sleep 1; curl -s -m 4 http://127.0.0.1:11908/api/tags | grep -c models")
+    assert(exitOf(up) == 0 && outOf(up).trim() == "1", up)
+
+    // --no-research: this test is about the GitHub digest reaching the prompt,
+    // and the online-research step is a separate concern (tests/Research.kf and
+    // tests/Planning.kf). Skipping it keeps the assertion deterministic.
+    var cmd = "cd '" + workDir("gh-prompt") + "' && KOF_PUBLISHER_HOME='" + workDir("gh-prompt") + "/home' KOF_LM_URL=http://127.0.0.1:11908 KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25 java -cp '" + classpath() + "' Default.Main plan --no-research --company company.kofmd --store pub.db 2>&1"
+    var p = runCmd(cmd)
+    assert(exitOf(p) == 0, p)
+
+    var grep = runCmd("grep -c 'PROJETO melmonfre/kof-publisher' '" + workDir("gh-prompt") + "/prompts.log'")
+    assert(exitOf(grep) == 0 && outOf(grep).trim() != "0", "github digest did not reach the prompt:\n" + grep)
+    // and the sourced caveat travels with it, so the model cannot claim verification
+    var grep2 = runCmd("grep -c 'nao verificado' '" + workDir("gh-prompt") + "/prompts.log'")
+    assert(exitOf(grep2) == 0 && outOf(grep2).trim() != "0", "sourced caveat missing:\n" + grep2)
+    runCmd("kill $(cat '" + workDir("gh-prompt") + "/lm.pid') 2>/dev/null || true")
+}
+
+test "github: disabled source does nothing and touches no network" {
+    prepare("gh-off")
+    writeCompany("gh-off", "melmonfre", false)
+    // no fixture started: a network call would fail, so a clean refusal proves
+    // the source was never consulted.
+    var g = cli("gh-off", "11999", "github --company company.kofmd --store pub.db")
+    assert(exitOf(g) != 0, g)
+    assert(has(outOf(g), "github desabilitado"), outOf(g))
+}
+
+// REGRESSION (AUD-5): an unreadable listing body (truncated JSON that still
+// starts with '[') used to decode to zero repos and be reported as "this
+// account has no public repo" — a false factual claim about the author. It must
+// be reported as a failed READ instead.
+test "github: an unreadable listing body is a failed read, not an empty account" {
+    prepare("gh-trunc")
+    writeCompany("gh-trunc", "melmonfre", true)
+    startGithub("gh-trunc", "11915", "trunc")
+
+    var g = cli("gh-trunc", "11915", "github --company company.kofmd --store pub.db")
+    assert(exitOf(g) != 0, g)
+    var out = outOf(g)
+    // the honest cause is surfaced...
+    assert(has(out, "ilegivel"), "truncated body not reported as unreadable:\n" + out)
+    // ...and the false claim is NOT made
+    assert(!has(out, "nao tem repositorio publico"), "truncated body misread as an empty account:\n" + out)
+    // nothing was persisted from a failed read
+    var show = cli("gh-trunc", "11915", "github --show --company company.kofmd --store pub.db")
+    assert(has(outOf(show), "nada analisado ainda"), "state written from a failed read:\n" + outOf(show))
+    stopGithub("gh-trunc")
+}
+
+// REGRESSION (AUD-6): `--repo` naming a repository that is not among the
+// account's public ones used to exit 0 with "0 analisado(s)" — a silent success.
+// An explicit miss must be an explicit error.
+test "github: --repo that matches nothing is an error, not a silent success" {
+    prepare("gh-miss")
+    writeCompany("gh-miss", "melmonfre", true)
+    startGithub("gh-miss", "11916", "normal")
+
+    var g = cli("gh-miss", "11916", "github --repo melmonfre/nao-existe --company company.kofmd --store pub.db")
+    assert(exitOf(g) != 0, "a repo that does not exist must not exit 0:\n" + g)
+    assert(has(outOf(g), "nao encontrado"), outOf(g))
+    // and nothing was analyzed or persisted
+    assert(!has(outOf(g), "analisado(s) agora"), outOf(g))
+    stopGithub("gh-miss")
+}
+
+// REGRESSION (AUD-2): GitHub's repo listing returns a token's PRIVATE repos on
+// the same endpoint as the public ones. Reading one would put material the
+// author never published in front of the editorial model. The publisher must
+// skip them and say so, never analyze them.
+test "github: a private repo in the listing is never read" {
+    prepare("gh-private")
+    writeCompany("gh-private", "melmonfre", true)
+    startGithub("gh-private", "11910", "hostile")
+
+    var g = cli("gh-private", "11910", "github --limit 10 --company company.kofmd --store pub.db")
+    assert(exitOf(g) == 0, g)
+    var out = outOf(g)
+    // the private repo is named as SKIPPED, not analyzed
+    assert(has(out, "melmonfre/private-notes"), "private repo not even mentioned:\n" + out)
+    assert(has(out, "PRIVADO"), "private skip not reported:\n" + out)
+    assert(has(out, "1 privado(s) nao lido(s)"), out)
+    // and its description (which only a read would surface) never appears
+    assert(!has(out, "not for public eyes"), "private repo content leaked:\n" + out)
+
+    // --show reads only what was persisted: the private repo must be absent there too
+    var show = cli("gh-private", "11910", "github --show --company company.kofmd --store pub.db")
+    assert(exitOf(show) == 0, show)
+    assert(!has(outOf(show), "private-notes"), "private repo was persisted:\n" + outOf(show))
+    stopGithub("gh-private")
+}
+
+// REGRESSION (AUD-3): credential-shaped text that is not a bare token — a
+// Cookie header and a URL with embedded credentials — must be redacted just
+// like a PAT, and it must be redacted EVERYWHERE it can travel: the console,
+// the persisted knowledge and the editorial prompt. The legitimate sentence in
+// the same README must survive (over-redaction is a failure too).
+test "github: cookie and URL credentials are redacted in output, store and prompt" {
+    prepare("gh-cookie")
+    writeCompany("gh-cookie", "melmonfre", true)
+    startGithub("gh-cookie", "11911", "hostile")
+
+    var g = cli("gh-cookie", "11911", "github --limit 10 --company company.kofmd --store pub.db")
+    assert(exitOf(g) == 0, g)
+    var show = cli("gh-cookie", "11911", "github --show --company company.kofmd --store pub.db")
+    assert(exitOf(show) == 0, show)
+    var out = outOf(g) + outOf(show)
+    assert(!has(out, "FAKEcookiesession000111222333444555"), "cookie value leaked:\n" + out)
+    assert(!has(out, "FAKEuser:FAKEpass"), "URL credentials leaked:\n" + out)
+    // the legitimate line still reads
+    assert(has(outOf(show), "Use `kof run` para subir o daemon"), "over-redacted:\n" + outOf(show))
+
+    // indirect leak: nothing in the SQLite store may hold the raw values
+    var db = runCmd("grep -c 'FAKEcookiesession000111222333444555\\|FAKEuser:FAKEpass' '" + workDir("gh-cookie") + "/pub.db' || true")
+    assert(outOf(db).trim() == "0", "secret persisted in the store:\n" + db)
+
+    // indirect leak: the editorial prompt must carry the redacted form only
+    stopGithub("gh-cookie")
+    runCmd("pkill -f 'fake_lm_persona[l].py 11912' || true; true")
+    var up = runCmd("cd '" + workDir("gh-cookie") + "' && { python3 '" + publisherDir() + "/tests/fake_lm_personal.py' 11912 distinct > lm.log 2>&1 & echo $! > lm.pid; }; sleep 1; curl -s -m 4 http://127.0.0.1:11912/api/tags | grep -c models")
+    assert(exitOf(up) == 0 && outOf(up).trim() == "1", up)
+    var cmd = "cd '" + workDir("gh-cookie") + "' && KOF_PUBLISHER_HOME='" + workDir("gh-cookie") + "/home' KOF_LM_URL=http://127.0.0.1:11912 KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25 java -cp '" + classpath() + "' Default.Main plan --company company.kofmd --store pub.db 2>&1"
+    var p = runCmd(cmd)
+    assert(exitOf(p) == 0, p)
+    var inPrompt = runCmd("grep -c 'FAKEcookiesession000111222333444555\\|FAKEuser:FAKEpass' '" + workDir("gh-cookie") + "/prompts.log' || true")
+    assert(outOf(inPrompt).trim() == "0", "secret reached the model prompt:\n" + inPrompt)
+    runCmd("kill $(cat '" + workDir("gh-cookie") + "/lm.pid') 2>/dev/null || true")
+}
+
+// REGRESSION (AUD-1): a public README is UNTRUSTED DATA. An instruction-shaped
+// line in it ("ignore all previous instructions", "invent experience") must
+// reach the model NEUTRALIZED and marked, never as plain prompt text, and the
+// standing warning must travel with the sourced material.
+test "github: instruction-shaped README text is neutralized as untrusted data" {
+    prepare("gh-inject")
+    writeCompany("gh-inject", "melmonfre", true)
+    startGithub("gh-inject", "11913", "hostile")
+    var g = cli("gh-inject", "11913", "github --limit 10 --company company.kofmd --store pub.db")
+    assert(exitOf(g) == 0, g)
+    // the hostile line is still VISIBLE (it is evidence, not something to hide)
+    // but it is explicitly labelled as data the model must not obey. The digest
+    // is what --show prints (the plain run prints only the summary).
+    var show = cli("gh-inject", "11913", "github --show --company company.kofmd --store pub.db")
+    assert(exitOf(show) == 0, show)
+    assert(has(outOf(show), "conteudo nao confiavel, tratado como dado"), "hostile line not marked:\n" + outOf(show))
+    // and the legitimate README line in the same block survives the marking
+    assert(has(outOf(show), "Use `kof run` para subir o daemon"), "legit line lost:\n" + outOf(show))
+    stopGithub("gh-inject")
+
+    runCmd("pkill -f 'fake_lm_persona[l].py 11914' || true; true")
+    var up = runCmd("cd '" + workDir("gh-inject") + "' && { python3 '" + publisherDir() + "/tests/fake_lm_personal.py' 11914 distinct > lm.log 2>&1 & echo $! > lm.pid; }; sleep 1; curl -s -m 4 http://127.0.0.1:11914/api/tags | grep -c models")
+    assert(exitOf(up) == 0 && outOf(up).trim() == "1", up)
+    var cmd = "cd '" + workDir("gh-inject") + "' && KOF_PUBLISHER_HOME='" + workDir("gh-inject") + "/home' KOF_LM_URL=http://127.0.0.1:11914 KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25 java -cp '" + classpath() + "' Default.Main plan --company company.kofmd --store pub.db 2>&1"
+    var p = runCmd(cmd)
+    assert(exitOf(p) == 0, p)
+    var warns = runCmd("grep -c 'DADO NAO CONFIAVEL' '" + workDir("gh-inject") + "/prompts.log'")
+    assert(exitOf(warns) == 0 && outOf(warns).trim() != "0", "untrusted-source warning missing from the prompt:\n" + warns)
+    var marked = runCmd("grep -c 'conteudo nao confiavel, tratado como dado' '" + workDir("gh-inject") + "/prompts.log'")
+    assert(exitOf(marked) == 0 && outOf(marked).trim() != "0", "hostile line reached the prompt unmarked:\n" + marked)
+    runCmd("kill $(cat '" + workDir("gh-inject") + "/lm.pid') 2>/dev/null || true")
+}

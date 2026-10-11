@@ -162,7 +162,17 @@ class LinkedInTarget implements PublicationTarget {
             throw "linkedin: LINKEDIN_ACCESS_TOKEN missing (env KOF_LINKEDIN_ACCESS_TOKEN) — credentials NEVER go in the company .md"
         }
         http.timeout(30)
-        var h = spawn http.post(apiUrl + "/rest/posts", bodyFor(text),
+        // AUDIT FIX (AUD-8): the request body is built BEFORE the spawn call on
+        // purpose. Inside a `spawn` lambda the compiler emits the LAMBDA's own
+        // `this` as the receiver of an enclosing-instance method call, so
+        // `bodyFor(text)` inline produced a class that fails JVM verification
+        // (VerifyError: LambdaTask not assignable to LinkedInTarget) and the
+        // LinkedIn path could never post. Hoisting the call keeps the lambda
+        // free of enclosing-instance method calls — the other spawn sites in
+        // this codebase already call only free functions, which is why they are
+        // unaffected.
+        var body = bodyFor(text)
+        var h = spawn http.post(apiUrl + "/rest/posts", body,
             "Content-Type: application/json",
             "Authorization: Bearer " + token,
             "X-Restli-Protocol-Version: 2.0.0",

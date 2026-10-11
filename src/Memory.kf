@@ -1,0 +1,141 @@
+
+// Memory — deterministic, LEXICAL editorial memory (repetition detection).
+//
+// Kept in its own file with NO cross-file dependency (stdlib `strings`/`math`
+// only) so `kof test src/Memory.kf` compiles and runs it standalone — the
+// root-package split (BUG-6) otherwise forces self-contained modules for
+// in-source unit tests.
+//
+// LIMITATION (documented honestly, acceptance §6): the publisher has no
+// embedding/semantic search in the Kof runtime, so repetition is detected
+// LEXICALLY — repeated opening/closing word-keys and n-gram overlap. This
+// catches "same words, presented as new" (the clearest tell of a re-run); it
+// does NOT catch a genuinely reworded restatement of the same thesis. A
+// semantic check would need a model call the project does not currently
+// budget; the lexical proxy is proportional and its gap is stated, not hidden.
+
+// Lowercase + strip Latin-1 accents, mapping every non-word char to a space.
+// Inlined here (not Recurrence.asciiFold) to keep this module self-contained.
+String foldForMemory(String s) {
+    var lower = s.toLowerCase()
+    var out = ""
+    var i = 0
+    while (i < lower.length) {
+        var c = lower.charAt(i)
+        if ((c >= 97 && c <= 122) || (c >= 48 && c <= 57)) {
+            out = out + lower.substring(i, i + 1)
+        } else if (c == 224 || c == 225 || c == 226 || c == 227 || c == 229) {
+            out = out + "a"
+        } else if (c == 231) {
+            out = out + "c"
+        } else if (c == 232 || c == 233 || c == 234) {
+            out = out + "e"
+        } else if (c == 237) {
+            out = out + "i"
+        } else if (c == 242 || c == 243) {
+            out = out + "o"
+        } else if (c == 250) {
+            out = out + "u"
+        } else {
+            out = out + " "
+        }
+        i = i + 1
+    }
+    return out
+}
+
+List<String> wordsOf(String text) {
+    var out = listOf<String>()
+    for (var part in foldForMemory(text).split(" ")) {
+        if (part != "") {
+            out.add(part)
+        }
+    }
+    return out
+}
+
+String joinWords(List<String> ws, Int from, Int count) {
+    var out = ""
+    var i = from
+    var end = math.min(from + count, ws.size())
+    while (i < end) {
+        if (out != "") {
+            out = out + " "
+        }
+        out = out + ws.get(i)
+        i = i + 1
+    }
+    return out
+}
+
+String openingKey(String text) {
+    var w = wordsOf(text)
+    return joinWords(w, 0, 6)
+}
+
+String closingKey(String text) {
+    var w = wordsOf(text)
+    return joinWords(w, math.max(0, w.size() - 6), 6)
+}
+
+// Percent of `a`'s n-grams that also appear in `b` (containment, not Jaccard:
+// the SHORT new text is what must not be a re-run of an older one).
+Int gramOverlapPercent(String a, String b, Int n) {
+    var wa = wordsOf(a)
+    var wb = wordsOf(b)
+    if (wa.size() < n || wb.size() < n) {
+        return 0
+    }
+    var bset = setOf<String>()
+    var i = 0
+    while (i + n <= wb.size()) {
+        bset.add(joinWords(wb, i, n))
+        i = i + 1
+    }
+    var total = 0
+    var shared = 0
+    var j = 0
+    while (j + n <= wa.size()) {
+        total = total + 1
+        if (bset.contains(joinWords(wa, j, n))) {
+            shared = shared + 1
+        }
+        j = j + 1
+    }
+    if (total == 0) {
+        return 0
+    }
+    return (shared * 100) / total
+}
+
+// recent*Contents() items are "<topic> || <content>" — compare the CONTENT
+// only, so a shared topic never counts as textual repetition.
+String recentContent(String item) {
+    var sep = item.indexOf(" || ")
+    if (sep >= 0) {
+        return item.substring(sep + 4, item.length)
+    }
+    return item
+}
+
+test "repetition keys are lexical and stable" {
+    assert(openingKey("Cara, isso aqui e serio, vamo falar de codigo") == "cara isso aqui e serio vamo")
+    assert(closingKey("a b c d e f g h") == "c d e f g h")
+    assert(openingKey("") == "")
+    assert(closingKey("") == "")
+}
+
+test "accented words fold to ascii" {
+    assert(openingKey("não é sobre isso, é sobre raciocínio") == "nao e sobre isso e sobre")
+}
+
+test "gram overlap flags a near-copy and clears an original" {
+    var a = "o compilador resolveu o problema do cast no poll da rede hoje"
+    assert(gramOverlapPercent(a, a, 4) == 100)
+    assert(gramOverlapPercent(a, "texto totalmente diferente sobre carreira e time", 4) < 20)
+}
+
+test "recent content strips the topic prefix" {
+    assert(recentContent("legado || o texto de verdade") == "o texto de verdade")
+    assert(recentContent("sem prefixo") == "sem prefixo")
+}
