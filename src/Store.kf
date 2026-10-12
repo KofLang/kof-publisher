@@ -475,6 +475,13 @@ class Store {
         return orm.delete<TopicRecord>(conn, id)
     }
 
+    // Delete ONE publication row by id. Used only by the explicit re-plan path
+    // (Publisher.clearReviewDrafts), never by retention — retention has its own
+    // live-state guard and must not be reimplemented here.
+    Int deleteDraft(String id): Bool {
+        return orm.delete<Publication>(conn, id)
+    }
+
     // ---- editorial memory: sources ----
 
     Int saveSource(SourceRef s) {

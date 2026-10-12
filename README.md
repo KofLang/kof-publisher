@@ -253,6 +253,13 @@ java -cp build/classes:$JARS Default.Main stop
   editorial **separados**. Subir o serviço **não** vira `assisted` em
   `autonomous`: o `status` mostra `publicacao: ASSISTIDA` mesmo com o serviço
   ativo.
+- **Cada horário faz a pesquisa completa**: quando o perfil declara `# category`
+  (o caso do perfil pessoal), o daemon roda o **mesmo pipeline do `plan`** em
+  cada ocorrência — consulta as fontes atuais, escolhe a pauta da função
+  daquele horário, grava a pauta e as fontes, gera, valida (editorial + proxy
+  factual) e deixa em `review`. Uma fonte que falha vira nota no log e o
+  horário é **pulado**, nunca preenchido com notícia inventada. Sem `# category`
+  (KofLab), o caminho antigo continua igual.
 
 
 ## Como configurar seu próprio app no LinkedIn
@@ -339,7 +346,7 @@ LM: estilo `openai` autodetectado quando a URL contém `/v1` (beta-llm;
 `reasoning_effort=none` senão o thinking come o budget), Ollama caso
 contrário (`"think":false` por default pelo mesmo motivo).
 
-## Testes — 77/77 verdes (kof instalado 0.5.0-beta e dev-jar)
+## Testes — 89/89 verdes (kof instalado 0.5.0-beta e dev-jar)
 
 ```bash
 rm -rf build/classes && kof build src --target jvm
@@ -350,12 +357,12 @@ kof test tests/Cli.kf --target jvm --timeout 140         # 8  e2e CLI (binario r
 kof test tests/FakeLm.kf --target jvm --timeout 220      # 3  pipeline+LM fake+daemon
 kof test tests/KofLab.kf --target jvm --timeout 260      # 4  fatos da lab+skip+estilo+marker
 kof test tests/Personal.kf --target jvm --timeout 260    # 4  perfil pessoal: plan/categorias/repeticao/material
-kof test tests/Identity.kf --target jvm --timeout 260    # 5  identidade: fatos/opinioes/principios no prompt, avoid, episodio inventado, alegacao de leitura
+kof test tests/Identity.kf --target jvm --timeout 260    # 7  identidade: fatos/opinioes no prompt, avoid, episodio inventado, alegacao de leitura, acao em primeira pessoa
 kof test tests/Github.kf --target jvm --timeout 300      # 12 github: evidencia/cache/sanitizacao/falha honesta
-kof test tests/Service.kf --target jvm --timeout 300     # 4  start/stop/status (sem duplicata, preserva estado)
+kof test tests/Service.kf --target jvm --timeout 300     # 5  start/stop/status (sem duplicata, preserva estado, daemon pesquisa)
 kof test tests/Targets.kf --target jvm --timeout 120     # 3  fronteira de publicacao (stub local; assisted nunca chama a API)
 kof test tests/Research.kf --target jvm --timeout 200    # 12 pesquisa online + retencao/migracao do banco
-kof test tests/Planning.kf --target jvm --timeout 300    # 8  selecao de pauta + integracao pesquisa->geracao->REVIEW
+kof test tests/Planning.kf --target jvm --timeout 300    # 17 selecao + integracao + propriedade/ausencia/reacao/episodio/teste/build nao afirmados
 ```
 Os E2E sobem fixture HTTP (Ollama-compatible para o LM, REST v3 para o GitHub;
 só o *modelo* e o *GitHub* são determinísticos; http/json/orm/targets/daemon/

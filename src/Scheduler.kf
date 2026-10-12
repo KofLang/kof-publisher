@@ -222,7 +222,15 @@ class Scheduler {
             for (var rn in run.notes()) {
                 log.info("pesquisa " + s.clock() + ": " + rn)
             }
-            var plan = buildPlan(company, store, run, 0, store.recentTopicThemes(12))
+            // Same history the `plan` command feeds the scorer: the persisted
+            // pautas AND the topics of the drafts already written. Using only
+            // one of the two would make the daemon slightly more willing to
+            // repeat than the manual command.
+            var history = store.recentTopicThemes(12)
+            for (var ht in store.recentTopics(12)) {
+                history.add(ht)
+            }
+            var plan = buildPlan(company, store, run, 0, history)
             var found = false
             for (var pc in plan.choices()) {
                 if (pc.clock() == s.clock()) {

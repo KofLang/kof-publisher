@@ -90,6 +90,177 @@ READCLAIM_TEXT = (
     "evidencia antes da adocao. #arquitetura #engenharia"
 )
 
+# A first-person episode wearing a retrospective verb ("me fez parar e
+# reler..."). Same invention as EPISODE_TEXT, different wording — measured on
+# the real run of 2026-10-11 on the projects slot, where it slipped past the
+# phrase list until "me fez <retrospectiva>" was added.
+RETRO_EPISODE_TEXT = (
+    "O projeto ganhou um fix que me fez parar e reler a documentacao inteira do "
+    "runtime antes de entender o que tinha mudado, porque o problema estava "
+    "escondido num detalhe de arredondamento que so aparece quando o volume de "
+    "operacoes cresce e a divergencia de centavos vira relatorio contabil "
+    "errado no fechamento do dia. A correcao trocou a operacao simples por uma "
+    "que arredonda explicitamente, o que parece cosmetico mas e o tipo de "
+    "detalhe que separa um sistema auditavel de um passivo escondido. "
+    "#engenharia"
+)
+
+# A news post that asserts a PROPERTY of the tool the material never states.
+# The consulted blurb is "88 pontos na front page"; nothing says where the
+# program runs. Measured on the real run of 2026-10-11, where the generator
+# wrote that the tool "roda no dispositivo, sem enviar audio para servidores
+# externos" and made that architecture the reason the news mattered.
+LOCALCLAIM_TEXT = (
+    "A ideia de um transcritor de voz que roda no dispositivo e processa tudo "
+    "localmente resolve um problema que ninguem quer admitir em voz alta, que e "
+    "a dependencia de servico externo para uma tarefa que deveria ser privada "
+    "por padrao. Sem enviar audio para fora da maquina, a ferramenta muda a "
+    "conversa sobre custo e sobre confianca, porque o dado sensivel nunca sai "
+    "do seu controle. O ganho nao esta em transcrever melhor que os modelos "
+    "grandes, esta em nao precisar de rede nem de conta paga para escrever um "
+    "comentario longo de codigo ou uma especificacao tecnica. #ferramentas"
+)
+
+# A news post that asserts an ABSENCE the material never states. The consulted
+# item says only "never needs the internet"; the camera and the app are the
+# generator's invention, negated. Measured verbatim from
+# pub-12-00-noon-22f8ee51 (real run of 2026-10-11). The property list is
+# positive-only ("usa a camera"), so a denial slipped past it.
+ABSENCE_CLAIM_TEXT = (
+    "Sobre o color picker, a ideia e simples e resolve um problema real de "
+    "design: pegar uma cor do mundo fisico sem depender de camera, app "
+    "instalado ou conexao. O que me chama atencao aqui nao e a tecnologia em "
+    "si, mas a decisao de restringir o escopo. Em vez de tentar ser um canivete "
+    "suico digital, ela abraca uma limitacao fisica como recurso. Isso e "
+    "engenharia honesta: voce define o contexto de uso e elimina tudo que nao "
+    "serve para ele. #ferramentas"
+)
+
+# A projects post that asserts a verification RESULT nobody produced. The
+# repository analysis records verified_build=false and "nada foi executado
+# aqui"; the post calls "a prova de que o codigo compila" what is only the
+# existence of source files. Measured from pub-06-00-morning-de2a104a (real
+# run of 2026-10-11). Distinct from TESTCLAIM_TEXT, which claims the tests
+# GUARANTEE something; this one claims the build HAPPENED.
+UNVERIFIED_CLAIM_TEXT = (
+    "O projeto avancou no nucleo e a mudanca real nos commits recentes esta na "
+    "correcao da matematica financeira, com o calculo de juros compostos "
+    "ajustado para evitar truncamento decimal. A estrutura separa as "
+    "responsabilidades entre foundation, customers, accounts e ledger, seguindo "
+    "o padrao de double-entry que define o comportamento contabil do sistema. "
+    "O codigo compila e segue a arquitetura proposta, com os arquivos de teste "
+    "presentes na raiz do repositorio. A decisao de manter a logica de negocio "
+    "dentro do COBOL, sem vazamentos para camadas externas, e um trade-off "
+    "tecnico explicito. #engenharia"
+)
+
+# A PROJECTS post that opens by narrating an encounter with the repository
+# ("Peguei o X de volta pra mao", "a primeira coisa que me chamou atencao").
+# The publisher read a commit log; it did not pick anything up or notice
+# anything with its eyes. Measured from the real run of 2026-10-11.
+ENCOUNTER_TEXT = (
+    "Peguei o projeto de volta pra mao depois de um tempo e a primeira coisa "
+    "que me chamou atencao nao foi o codigo em si, mas o esqueleto da "
+    "configuracao. A estrutura base e solida, com separacao correta entre app, "
+    "spec e tsconfig, mas o README ainda entrega o texto padrao do gerador, "
+    "cheio de instrucoes genericas sobre como subir o servidor local. Ter "
+    "arquivos de teste na raiz e bom sinal de intencao, mas nao prova cobertura "
+    "real nem qualidade, porque a analise so leu a estrutura e nao compilou "
+    "nada. Ter a configuracao correta e ter testes escritos sao coisas "
+    "diferentes de ter um sistema que se comporta como esperado. #engenharia"
+)
+
+# A NEWS post that asserts third-party REACTION to the item. The material is a
+# title, a url, a date and a point count; it has no comment section and no
+# reader response. Measured from the real run of 2026-10-11, where the news
+# post described "a reacao de quem leu isso como se fosse uma tragedia".
+REACTION_CLAIM_TEXT = (
+    "Achei um post de blog com um titulo que soa como despedida, e o que mais "
+    "me chamou atencao nao foi o texto, mas a reacao de quem leu isso como se "
+    "fosse uma tragedia ou um fim de carreira. A gente criou uma expectativa "
+    "estranha de que quem e relevante tecnicamente precisa estar produzindo "
+    "conteudo publico o tempo todo, senao desapareceu do mapa. Essa narrativa "
+    "de sumico confunde visibilidade com competencia e transforma a atividade "
+    "editorial num indicador de saude profissional. Talvez a gente deva parar "
+    "de medir relevancia pela frequencia de publicacao. #engenharia"
+)
+
+# A NEWS post that narrates the author's own day around the item. The pauta
+# holds a consulted item, not a working day. Measured on the real run of
+# 2026-10-11, where the news slot opened with "Passei o dia com a cabeca
+# dividida entre um build de sistema financeiro e um link que apareceu no
+# Hacker News" — the episode check was scoped to profile/repo at the time.
+NEWS_EPISODE_TEXT = (
+    "Passei o dia com a cabeca dividida entre um build de sistema financeiro e "
+    "um link que apareceu no agregador, e o contraste me fez pensar em como "
+    "tratamos o ambiente como algo passivo. No meu trabalho com transferencias "
+    "e cobranca, vejo diariamente logica que existe mais para proteger um "
+    "processo quebrado do que para garantir a integridade do dado, e a "
+    "ferramenta comentada levanta a mesma pergunta sobre atrito desnecessario. "
+    "A ideia vale a pena pelo que ela obriga a discutir, nao pelo anuncio. "
+    "#engenharia"
+)
+
+# A post that claims the author DID the work ("Fiz um merge", "Ajustei...") on
+# a pauta whose material is a read-only repository analysis. Measured on the
+# real run of 2026-10-11: the projects post opened with "Fiz um merge no
+# kofbank que corrigia o calculo de juros compostos" and "Ajustei para usar
+# COMPUTE ROUNDED".
+ACTIONCLAIM_TEXT = (
+    "Fiz um merge no projeto que corrigia o calculo de juros compostos e o "
+    "problema nao era a formula, era como a linguagem lidava com a precisao "
+    "decimal em operacoes encadeadas. Ajustei para usar arredondamento "
+    "explicito na rotina de composicao, garantindo que o truncamento silencioso "
+    "nao acumulasse erro ao longo do tempo. A estrutura do repositorio separa "
+    "fundacao de logica de dominio e os commits recentes mostram essa "
+    "disciplina, com correcoes pontuais seguidas de documentacao de evidencia. "
+    "#engenharia"
+)
+
+# A projects post that upgrades "there are test files" into "the tests
+# guarantee X". The repository analysis records only that test files exist and
+# that nothing was executed, so the claim is unsupported. Measured on the real
+# run of 2026-10-11.
+TESTCLAIM_TEXT = (
+    "O projeto avancou no nucleo e o commit mais recente corrige a matematica "
+    "de juros compostos, trocando a operacao simples por arredondamento "
+    "explicito. Isso significa que os testes presentes no repositorio validam "
+    "invariantes de dupla entrada e idempotencia nas operacoes basicas, o que "
+    "da confianca para seguir com a proxima camada de integracao sem refazer a "
+    "base contabil. A separacao entre fundacao e dominio ajuda a isolar onde o "
+    "dinheiro e calculado de onde ele e registrado. #engenharia"
+)
+
+# The same unsupported upgrade, but with the denial and the guarantee in the
+# SAME sentence, which is how the real draft of 2026-10-11 actually read. A
+# sentence-level check sees "nao cobrem" and skips the whole thing, so the
+# guarantee in the first clause survives. Copied from pub-06-00-morning-8948d1a7.
+TESTCLAIM_DENIAL_TEXT = (
+    "O projeto avancou no nucleo e o commit mais recente corrige a matematica "
+    "de juros compostos, trocando a operacao simples por arredondamento "
+    "explicito. Isso significa que os testes presentes no repositorio validam "
+    "invariantes de dupla entrada e idempotencia nas operacoes basicas, mas "
+    "nao cobrem todo o fluxo de pagamento nem a reconciliacao complexa que o "
+    "README descreve como alvo futuro. A separacao entre fundacao e dominio "
+    "ajuda a isolar onde o dinheiro e calculado de onde ele e registrado. "
+    "#engenharia"
+)
+
+# The same test-guarantee upgrade in its infinitive/concessive form. The
+# denial sits after "embora" (not "mas") and the guarantee verb is "garantir"
+# (not "garantem"), so both the clause split and the verb list missed it.
+# Measured verbatim from pub-06-00-morning-4779c475 (real run of 2026-10-11).
+TESTCLAIM_EMBORA_TEXT = (
+    "O log de commits do projeto mostra um ajuste fino na logica de juros "
+    "compostos, com arredondamento explicito para evitar truncamento decimal. "
+    "A estrutura mantem o nucleo isolado, com camadas de fundacao para lock "
+    "atomico, journaling e idempotencia, tudo documentado como requisito. Os "
+    "testes existem como golden datasets e verificacoes de invariantes, o que e "
+    "suficiente para garantir que as regras contabeis nao se percam durante "
+    "refatoracoes, embora nao substituam a validacao de comportamento real. E "
+    "engenharia aplicada, sem hype. #engenharia"
+)
+
 # A text that is otherwise valid but contains a phrase a profile lists under
 # `# avoid` — the deterministic validator must reject it (never publish).
 FORBIDDEN_TEXT = (
@@ -144,8 +315,33 @@ def pick_reply(prompt: str, mode: str) -> str:
         return EPISODE_TEXT
     if mode == "readclaim":
         return READCLAIM_TEXT
+    if mode == "retroepisode":
+        return RETRO_EPISODE_TEXT
+    if mode == "localclaim":
+        return LOCALCLAIM_TEXT
+    if mode == "newsepisode":
+        return NEWS_EPISODE_TEXT
+    if mode == "actionclaim":
+        return ACTIONCLAIM_TEXT
     m = re.search(r"CATEGORIA EDITORIAL DESTE HORARIO: (.*)", prompt)
     label = m.group(1).lower() if m else ""
+    # Scoped to the PROJECTS slot: this mode exists to prove the repo-origin
+    # test-guarantee check fires, and every other slot must keep producing its
+    # own distinct text or the anti-repetition gate discards them first.
+    if mode == "testclaim" and "trabalho" in label:
+        return TESTCLAIM_TEXT
+    if mode == "testclaimdenial" and "trabalho" in label:
+        return TESTCLAIM_DENIAL_TEXT
+    if mode == "testclaimembora" and "trabalho" in label:
+        return TESTCLAIM_EMBORA_TEXT
+    if mode == "absenceclaim" and "noticia" in label:
+        return ABSENCE_CLAIM_TEXT
+    if mode == "reactionclaim" and "noticia" in label:
+        return REACTION_CLAIM_TEXT
+    if mode == "unverifiedclaim" and "trabalho" in label:
+        return UNVERIFIED_CLAIM_TEXT
+    if mode == "encounter" and "trabalho" in label:
+        return ENCOUNTER_TEXT
     for key, text in BY_CATEGORY.items():
         if key in label:
             return text

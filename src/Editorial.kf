@@ -20,6 +20,349 @@ record Validation(Bool ok, List<String> problems, List<String> warnings)
 // shape as Validation on purpose: a caller treats a hard problem the same way.
 record FactCheck(Bool ok, List<String> problems, List<String> warnings)
 
+// A property asserted ABOUT a consulted tool (where it runs, how it is
+// implemented) paired with the word that would have to appear in the source
+// material for the claim to be grounded. A news item's blurb describes what a
+// project IS; it does not disclose where it runs or how it works inside.
+record PropertyClaim(String phrase, String key)
+
+// A technology component whose ABSENCE a text may assert ("sem camera", "nao
+// precisa de conta"). The aliases are every surface form to look for in the
+// draft and in the consulted material; the claim is grounded only if some
+// alias appears in the material.
+record DepKey(String term, List<String> aliases)
+
+List<PropertyClaim> propertyClaims() {
+    var out = listOf<PropertyClaim>()
+    out.add(PropertyClaim("alternativa local", "local"))
+    out.add(PropertyClaim("ferramenta local", "local"))
+    out.add(PropertyClaim("roda local", "local"))
+    out.add(PropertyClaim("roda localmente", "local"))
+    out.add(PropertyClaim("processa localmente", "local"))
+    out.add(PropertyClaim("processamento local", "local"))
+    out.add(PropertyClaim("processa no dispositivo", "dispositivo"))
+    out.add(PropertyClaim("roda no dispositivo", "dispositivo"))
+    out.add(PropertyClaim("roda no proprio dispositivo", "dispositivo"))
+    out.add(PropertyClaim("no proprio dispositivo", "dispositivo"))
+    out.add(PropertyClaim("on-device", "device"))
+    out.add(PropertyClaim("roda offline", "offline"))
+    out.add(PropertyClaim("funciona offline", "offline"))
+    out.add(PropertyClaim("sem enviar", "local"))
+    out.add(PropertyClaim("nao envia dados", "local"))
+    out.add(PropertyClaim("roda na nuvem", "nuvem"))
+    out.add(PropertyClaim("processa na nuvem", "nuvem"))
+    out.add(PropertyClaim("usa sensores", "sensor"))
+    out.add(PropertyClaim("usa a camera", "camera"))
+    out.add(PropertyClaim("hospedado no github", "github"))
+    out.add(PropertyClaim("esta no github", "github"))
+    out.add(PropertyClaim("disponivel no github", "github"))
+    return out
+}
+
+// Everything the material actually says about the consulted items, folded for
+// substring search. This is the corpus a property claim is checked against.
+String sourceCorpus(List<SourceRef> sources) {
+    var b = ""
+    for (var s in sources) {
+        b = b + " " + s.title() + " " + s.summary() + " " + s.publisher() + " " + s.url()
+    }
+    return strings.toSnakeCase(asciiFold(b))
+}
+
+// Negation markers: a clause that DENIES a component is asserting something
+// the material must support. Measured on the real run of 2026-10-11: the news
+// post said the colour picker works "sem depender de camera, app instalado ou
+// conexao", but the consulted item says only "never needs the internet" — the
+// absence of a camera and of an app was invented, and a positive-only property
+// list cannot see it.
+List<String> absenceMarkers() {
+    var out = listOf<String>()
+    // Requirement denials only. A bare "sem" is NOT enough: "os servicos
+    // ficaram sem conexao" describes an outage, it does not claim the item
+    // dispenses with connectivity. Measured on the real run of 2026-10-11,
+    // where a bare "sem " discarded a news draft about a data-centre incident.
+    out.add("sem depender")
+    out.add("sem precisar")
+    out.add("sem necessidade")
+    out.add("dispensa")
+    out.add("dispensando")
+    out.add("nao precisa")
+    out.add("nao depende")
+    out.add("nao exige")
+    out.add("nao requer")
+    out.add("nao necessita")
+    out.add("nao usa")
+    out.add("nao tem")
+    out.add("nao envia")
+    out.add("nao consome")
+    return out
+}
+
+List<DepKey> absenceKeys() {
+    var out = listOf<DepKey>()
+    out.add(DepKey("camera", listOf<String>("camera", "cameras", "foto", "fotografia")))
+    out.add(DepKey("conexao", listOf<String>("conexao", "conexoes", "internet", "online", "wifi", "rede", "dados moveis")))
+    out.add(DepKey("app instalado", listOf<String>("app", "aplicativo", "instalar", "instalado", "instalacao", "download")))
+    out.add(DepKey("conta", listOf<String>("conta", "login", "cadastro", "usuario")))
+    out.add(DepKey("servidor", listOf<String>("servidor", "servidores", "nuvem", "cloud", "backend")))
+    out.add(DepKey("gps", listOf<String>("gps", "localizacao")))
+    out.add(DepKey("sensores", listOf<String>("sensor", "sensores")))
+    out.add(DepKey("assinatura", listOf<String>("assinatura", "pagamento", "pago", "premium", "gratuito", "gratis")))
+    return out
+}
+
+// An asserted ABSENCE of a component ("sem camera") that the consulted
+// material never mentions. Returns the component name, or "". Scoped to a
+// clause so that a denial in one place cannot excuse an assertion in another.
+String absenceClaim(String text, String corpus) {
+    var markers = absenceMarkers()
+    for (var clause in splitSentences(text)) {
+        var low = strings.toSnakeCase(asciiFold(clause))
+        var hasDenial = false
+        for (var m in markers) {
+            if (low.indexOf(strings.toSnakeCase(asciiFold(m))) >= 0) {
+                hasDenial = true
+            }
+        }
+        if (!hasDenial) {
+            continue
+        }
+        for (var dk in absenceKeys()) {
+            var inText = false
+            for (var a in dk.aliases()) {
+                if (low.indexOf(strings.toSnakeCase(asciiFold(a))) >= 0) {
+                    inText = true
+                }
+            }
+            if (!inText) {
+                continue
+            }
+            var grounded = false
+            for (var a in dk.aliases()) {
+                if (corpus.indexOf(strings.toSnakeCase(asciiFold(a))) >= 0) {
+                    grounded = true
+                }
+            }
+            if (!grounded) {
+                return dk.term()
+            }
+        }
+    }
+    return ""
+}
+
+// A claim about how OTHER PEOPLE reacted to a consulted item, or about a
+// "narrative" around it. A consulted item is a title, url, date and blurb; it
+// carries no reader response and no comment section, so such a claim describes
+// something nobody in this system read.
+List<String> reactionPhrases() {
+    var out = listOf<String>()
+    out.add("a reacao de quem")
+    out.add("a reacao dos")
+    out.add("quem leu")
+    out.add("os leitores")
+    out.add("a recepcao")
+    out.add("a comunidade reagiu")
+    out.add("narrativa de")
+    out.add("narrativa do")
+    out.add("o consenso")
+    out.add("muita gente comentou")
+    out.add("nos comentarios")
+    out.add("a discussao nos")
+    return out
+}
+
+String reactionClaim(String text) {
+    var norm = " " + strings.toSnakeCase(asciiFold(text)) + " "
+    for (var p in reactionPhrases()) {
+        if (norm.indexOf(strings.toSnakeCase(asciiFold(p))) >= 0) {
+            return p
+        }
+    }
+    return ""
+}
+
+// Contrastive conjunctions. A single sentence can carry a GUARANTEE in one
+// clause and a DENIAL in another, and the denial does not excuse the
+// guarantee. Measured on the real run of 2026-10-11: the projects post said
+// "... os testes presentes no repositorio VALIDAM invariantes de dupla
+// entrada ..., mas NAO COBREM todo o fluxo de pagamento ...". Sentence-level
+// matching saw "nao cobrem" and skipped the whole sentence, so the
+// unverifiable guarantee in the first clause passed. Splitting at the
+// conjunction puts each clause on its own.
+List<String> clauseMarkers() {
+    var out = listOf<String>()
+    out.add(" mas ")
+    out.add(" porem ")
+    out.add(" porém ")
+    out.add(" contudo ")
+    out.add(" entretanto ")
+    out.add(" todavia ")
+    out.add(" no entanto ")
+    out.add(" so que ")
+    out.add(" só que ")
+    out.add(" e sim ")
+    // Concessives too. "Os testes ... sao suficientes para garantir X, EMBORA
+    // nao substituam Y" puts the denial after the conjunction exactly like
+    // "mas", and the guarantee before it must still be judged. Measured on the
+    // real run of 2026-10-11.
+    out.add(" embora ")
+    out.add(" ainda que ")
+    out.add(" mesmo que ")
+    out.add(" apesar de ")
+    return out
+}
+
+// Clauses, split on the punctuation itself and on contrastive conjunctions.
+// NOT String.split(". "): Kof's split takes a REGEX, so "." matches any
+// character and the split silently eats a letter at every boundary — measured
+// on 2026-10-11, when "os testes presentes no repositorio validam" came back
+// as fragments that never matched. A plain character scan has no surprise.
+// Top level, not a method: the factual checks are free functions so they can
+// be reached from the same places the other top-level helpers are.
+List<String> splitSentences(String text) {
+    var out = listOf<String>()
+    var marks = clauseMarkers()
+    var cur = ""
+    var i = 0
+    while (i < text.length) {
+        var c = text.charAt(i)
+        var cut = false
+        var skip = 1
+        if (c == "." || c == "!" || c == "?" || c == "\n") {
+            cut = true
+        } else {
+            for (var m in marks) {
+                if (i + m.length <= text.length && text.substring(i, i + m.length) == m) {
+                    cut = true
+                    skip = m.length
+                }
+            }
+        }
+        if (cut) {
+            if (cur.trim() != "") {
+                out.add(cur)
+            }
+            cur = ""
+        } else {
+            cur = cur + c
+        }
+        i = i + skip
+    }
+    if (cur.trim() != "") {
+        out.add(cur)
+    }
+    return out
+}
+
+// Phrases that assert a build, test run or execution HAPPENED. The repository
+// analysis records only what was read; verified_build/verified_tests are false
+// and the evidence string says "nada foi executado aqui". Measured on the real
+// run of 2026-10-11: the projects post closed by calling "a prova de que o
+// codigo compila" — a proof nobody produced, since the publisher never ran
+// anything. "ha arquivos de teste" is not "os testes passam".
+List<String> verificationAssertions() {
+    var out = listOf<String>()
+    out.add("prova de que")
+    out.add("esta provado")
+    out.add("esta comprovado")
+    out.add("foi verificado")
+    out.add("esta verificado")
+    out.add("foi executado")
+    out.add("foi testado")
+    out.add("esta testado")
+    out.add("os testes passam")
+    out.add("passa nos testes")
+    out.add("passam nos testes")
+    out.add("testes verdes")
+    out.add("build verde")
+    out.add("build passa")
+    out.add("compila")
+    out.add("compilou")
+    out.add("builda")
+    out.add("buildou")
+    out.add("roda sem")
+    out.add("rodou")
+    // NOT the bare "funciona"/"funcionam": in Portuguese technical prose that
+    // word is descriptive as often as it is assertive ("entender como
+    // funciona", "ver se funciona"), so matching it alone would flag correct
+    // sentences. The unambiguous result verbs above carry the check. Measured
+    // on the real run of 2026-10-11: a projects draft was discarded on the bare
+    // word before this was narrowed.
+    return out
+}
+
+// Clauses that explicitly DENY that a verification happened. These are the
+// correct statement and must not be flagged.
+List<String> verificationDenials() {
+    var out = listOf<String>()
+    out.add("nao prova")
+    out.add("nao comprova")
+    out.add("nao foi executado")
+    out.add("nada foi executado")
+    out.add("nenhum resultado")
+    out.add("nao foi confirmado")
+    out.add("nao foi verificado")
+    out.add("nao foi testado")
+    out.add("nao quer dizer")
+    out.add("nao significa")
+    out.add("nao garante")
+    out.add("sem prova")
+    out.add("nao passou")
+    out.add("nao rodou")
+    out.add("nao compila")
+    out.add("nao funciona")
+    return out
+}
+
+// Clauses that frame the verb as something someone ELSE claims, or as a
+// hypothetical, rather than asserting it. "Dizer que o projeto funciona seria
+// um salto logico" contains the verb but makes no claim; only the clause that
+// asserts the result should be judged.
+List<String> hedgeMarkers() {
+    var out = listOf<String>()
+    out.add("seria")
+    out.add("poderia")
+    out.add("talvez")
+    out.add("dizer que")
+    out.add("falando que")
+    out.add("afirmar que")
+    out.add("alegar que")
+    out.add("supostamente")
+    out.add("no papel")
+    out.add("se dependesse")
+    return out
+}
+
+String unverifiedClaim(String text) {
+    var asserts = verificationAssertions()
+    var denials = verificationDenials()
+    var hedges = hedgeMarkers()
+    for (var clause in splitSentences(text)) {
+        var low = strings.toSnakeCase(asciiFold(clause))
+        var skipped = false
+        for (var d in denials) {
+            if (low.indexOf(strings.toSnakeCase(asciiFold(d))) >= 0) {
+                skipped = true
+            }
+        }
+        for (var h in hedges) {
+            if (low.indexOf(strings.toSnakeCase(asciiFold(h))) >= 0) {
+                skipped = true
+            }
+        }
+        if (skipped) {
+            continue
+        }
+        for (var a in asserts) {
+            if (low.indexOf(strings.toSnakeCase(asciiFold(a))) >= 0) {
+                return a
+            }
+        }
+    }
+    return ""
+}
+
 // ---- helpers for the factual proxy ----
 
 // http/https occurrences in the text.
@@ -554,8 +897,199 @@ class Editorial {
         marks.add("eu corrigi")
         marks.add("eu debuguei")
         marks.add("eu implementei")
+        // "me fez <retrospectiva>" is the same episode wearing a different
+        // verb: the subject is still an experience the author supposedly had
+        // with the material. Measured on the real run of 2026-10-11: the
+        // projects post opened with "O kofbank ganhou um fix que me fez parar
+        // e reler a documentacao do GnuCOBOL" — nobody reler anything, the
+        // publisher read a commit log.
+        marks.add("me fez parar")
+        marks.add("me fez reler")
+        marks.add("me fez repensar")
+        marks.add("me fez rever")
+        marks.add("me fez revisar")
+        marks.add("me fez voltar")
+        // "me chamou atencao" is the same retrospective stance: it says the
+        // author LOOKED at the material and something about it caught her eye,
+        // which is a lived encounter with a thing she only read. Measured on
+        // the real run of 2026-10-11: the projects post opened with "Peguei o
+        // nsu-front de volta pra mao ... a primeira coisa que me chamou atencao
+        // nao foi o codigo em si, mas o esqueleto da configuracao".
+        marks.add("me chamou atencao")
+        marks.add("me chamou a atencao")
+        marks.add("chamou minha atencao")
+        marks.add("peguei o")
+        marks.add("peguei a")
+        marks.add("peguei esse")
+        marks.add("peguei essa")
+        marks.add("voltei a mexer")
+        marks.add("voltei a olhar")
+        marks.add("voltei a trabalhar")
+        marks.add("de volta pra mao")
+        marks.add("de volta a mao")
+        marks.add("me obrigou a")
+        marks.add("me levou a reler")
+        marks.add("me levou a revisar")
+        // The author's own working day. A NEWS pauta rests on a consulted item,
+        // never on what the author was doing when she saw it. Measured on the
+        // real run of 2026-10-11: the news post opened with "Passei o dia com a
+        // cabeca dividida entre um build de sistema financeiro e um link que
+        // apareceu no Hacker News".
+        marks.add("no meu trabalho")
+        marks.add("no meu dia a dia")
+        marks.add("na minha rotina")
+        marks.add("vejo diariamente")
+        marks.add("no dia a dia eu")
         for (var m in marks) {
             if (norm.indexOf(strings.toSnakeCase(asciiFold(m))) >= 0) {
+                return m
+            }
+        }
+        return ""
+    }
+
+    // Phrases that upgrade "there are test files" into "the tests guarantee
+    // something". The repository analysis deliberately records only that test
+    // files EXIST ("o que NAO prova cobertura nem qualidade") and that nothing
+    // was executed here, so any of these is an assertion the material does not
+    // support. Measured on the real run of 2026-10-11: the projects post said
+    // "os testes presentes no repositorio validam invariantes de dupla entrada
+    // e idempotencia" — a coverage claim built on a directory listing.
+    // Phrases that DENY a test guarantee. Only these make a test sentence
+    // innocent; a bare "nao" or "sem" anywhere in the sentence is too coarse.
+    List<String> denialPhrases() {
+        var out = listOf<String>()
+        out.add("nao prova")
+        out.add("nao provam")
+        out.add("nao garante")
+        out.add("nao garantem")
+        out.add("nao valida")
+        out.add("nao validam")
+        out.add("nao cobre")
+        out.add("nao cobrem")
+        out.add("nao comprova")
+        out.add("nao comprovam")
+        out.add("nao assegura")
+        out.add("nao atesta")
+        out.add("nao roda")
+        out.add("nao rodam")
+        out.add("nao executa")
+        out.add("nao ha testes")
+        out.add("nao existe teste")
+        out.add("sem testes")
+        out.add("nenhum teste")
+        return out
+    }
+
+    // Contrastive conjunctions live in the free function `clauseMarkers`
+    // below; the rationale is there. See `splitSentences`.
+    String testGuaranteeClaim(String text) {
+        // Sentence-level, not a fixed phrase list: the generator writes "os
+        // testes PRESENTES NO REPOSITORIO validam invariantes", so matching
+        // "os testes validam" literally missed it (measured 2026-10-11). What
+        // matters is a sentence that mentions tests AND asserts a guarantee.
+        var verbs = listOf<String>()
+        verbs.add("validam")
+        verbs.add("garantem")
+        // The INFINITIVE and participle forms carry the same claim. Measured on
+        // the real run of 2026-10-11: "os testes existem como golden datasets e
+        // verificacoes de invariantes, o que e SUFICIENTE PARA GARANTIR que as
+        // regras contabeis nao se percam" — the finite "garantem" never
+        // appeared, so the check sailed past it.
+        verbs.add("garantir")
+        verbs.add("garantindo")
+        verbs.add("garante")
+        verbs.add("cobrem")
+        verbs.add("comprovam")
+        verbs.add("provam")
+        verbs.add("asseguram")
+        verbs.add("atestam")
+        verbs.add("dao garantia")
+        verbs.add("cobertura")
+        for (var s in splitSentences(text)) {
+            var low = "_" + strings.toSnakeCase(asciiFold(s)) + "_"
+            if (low.indexOf("teste") < 0) {
+                continue
+            }
+            // A DENIAL in the same sentence means the author is refusing the
+            // guarantee, which is the correct statement and must not be
+            // flagged. The denial is matched as verb-specific phrases, not as a
+            // bare "sem"/"nao": the real draft said "... validam invariantes
+            // ... sem refazer a base contabil", where "sem" denies the REFACTOR
+            // and not the guarantee (measured 2026-10-11).
+            var denied = false
+            for (var d in denialPhrases()) {
+                if (low.indexOf("_" + strings.toSnakeCase(asciiFold(d))) >= 0) {
+                    denied = true
+                }
+            }
+            if (denied) {
+                continue
+            }
+            for (var v in verbs) {
+                var needle = "_" + strings.toSnakeCase(asciiFold(v))
+                if (low.indexOf(needle) >= 0) {
+                    return v
+                }
+            }
+        }
+        return ""
+    }
+
+    // A first-person ACTION verb in the past tense ("fiz um merge", "ajustei",
+    // "rodei os testes"). Unambiguous in Portuguese — these forms have no other
+    // reading — so a substring match on space-padded text is enough. Kept
+    // apart from episodicNarrative because these claim the AUTHOR DID the work,
+    // not that she lived through a day.
+    //
+    // Measured on the real run of 2026-10-11: the projects post, whose material
+    // is a read-only repository analysis, opened with "Fiz um merge no kofbank
+    // que corrigia o calculo de juros compostos" and "Ajustei para usar COMPUTE
+    // ROUNDED" — the publisher read a commit log and narrated it as its own
+    // authorship.
+    String firstPersonAction(String text) {
+        // Underscore padding, not spaces: toSnakeCase turns the text's spaces
+        // INTO underscores, so a " fiz " needle could never match. The
+        // separators are the word boundaries here, which is also what keeps
+        // "fiz" from matching inside "fizeram".
+        var norm = "_" + strings.toSnakeCase(asciiFold(text)) + "_"
+        var marks = listOf<String>()
+        // Deliberately ONLY verbs that assert work PERFORMED on the material.
+        // Judgment verbs ("preferi", "decidi", "escolhi"), perception verbs
+        // ("percebi", "notei", "descobri") and reading ("li") are excluded:
+        // they are how the author states a POSITION, which is exactly what a
+        // profile pauta is for, and flagging them made the check fire on clean
+        // text. "prefiro uma solucao simples" is her stance; "refatorei o
+        // modulo" is a claim that she did the work.
+        marks.add("fiz")
+        marks.add("ajustei")
+        marks.add("corrigi")
+        marks.add("implementei")
+        marks.add("refatorei")
+        marks.add("rodei")
+        marks.add("testei")
+        marks.add("validei")
+        marks.add("mergeei")
+        marks.add("commitei")
+        marks.add("criei")
+        marks.add("adicionei")
+        marks.add("removi")
+        marks.add("mudei")
+        marks.add("alterei")
+        marks.add("atualizei")
+        marks.add("refiz")
+        marks.add("consertei")
+        marks.add("arrumei")
+        marks.add("melhorei")
+        marks.add("otimizei")
+        marks.add("simplifiquei")
+        marks.add("documentei")
+        marks.add("registrei")
+        marks.add("resolvi")
+        marks.add("reescrevi")
+        for (var m in marks) {
+            var needle = "_" + strings.toSnakeCase(asciiFold(m)) + "_"
+            if (norm.indexOf(needle) >= 0) {
                 return m
             }
         }
@@ -601,7 +1135,11 @@ class Editorial {
 
     Bool numberInSources(String n, List<SourceRef> sources) {
         for (var s in sources) {
-            if (s.summary().indexOf(n) >= 0 || s.title().indexOf(n) >= 0 || s.published_at().indexOf(n) >= 0) {
+            // The URL counts as source material: an identifier like the AS
+            // number in "radar.cloudflare.com/bots/as13238" IS in the consulted
+            // material, and flagging it was a false positive on the real run of
+            // 2026-10-11.
+            if (s.summary().indexOf(n) >= 0 || s.title().indexOf(n) >= 0 || s.published_at().indexOf(n) >= 0 || s.url().indexOf(n) >= 0) {
                 return true
             }
         }
@@ -655,9 +1193,14 @@ class Editorial {
         lived.add("eu tava")
         lived.add("eu estava")
         var claim = ""
+        // Underscore boundaries, for the same reason as firstPersonAction:
+        // toSnakeCase turns spaces into underscores, so the old " " + needle
+        // form only matched when the phrase STARTED the text and silently
+        // missed "porque eu fiz ..." in the middle of a sentence.
+        var normLive = "_" + strings.toSnakeCase(asciiFold(text)) + "_"
         for (var l in lived) {
-            var needle = strings.toSnakeCase(asciiFold(l))
-            if (norm.contains(" " + needle)) {
+            var needle = "_" + strings.toSnakeCase(asciiFold(l)) + "_"
+            if (normLive.indexOf(needle) >= 0) {
                 claim = l
                 break
             }
@@ -669,6 +1212,16 @@ class Editorial {
                 if (origin != "repo" && origin != "profile") {
                     warnings.add("fidelidade: afirmacao em primeira pessoa ('" + claim + "') sem material proprio identificado")
                 }
+            }
+        }
+
+        // -- test guarantees: "there are test files" is not "the tests cover
+        // this". The repository analysis says so in as many words, and the
+        // README's own rule is that a documented thing is not a verified one.
+        if (origin == "repo") {
+            var tc = testGuaranteeClaim(text)
+            if (tc != "") {
+                problems.add("fidelidade: o texto afirma que os testes garantem algo ('" + tc + "') mas o material so registra que arquivos de teste EXISTEM — nada foi executado aqui, e existencia de teste nao prova cobertura")
             }
         }
 
@@ -701,17 +1254,27 @@ class Editorial {
             }
         }
 
-        // -- first-person episodes: a pauta grounded only in the author's own
-        // POSITION contains no episode. A post that narrates one ("passei a
-        // tarde debugando...") is inventing lived experience, which the
-        // profile's authenticity rule forbids outright. Scoped to `profile`
-        // because a repo pauta legitimately rests on persisted real activity
-        // and a news pauta on a consulted item.
-        if (origin == "profile" || origin == "repo") {
-            var ep = episodicNarrative(text)
-            if (ep != "") {
-                problems.add("fidelidade: o texto narra um episodio em primeira pessoa ('" + ep + "') mas o material desta pauta e um registro (posicao ou leitura do repositorio), nao um caso vivido")
-            }
+        // -- first-person episodes: no pauta in this system carries a lived
+        // episode. A profile pauta holds a POSITION, a repo pauta a reading of
+        // the repository, and a news pauta a consulted item — none of them is
+        // "a day the author had". So the check runs for EVERY origin. It was
+        // first scoped to profile/repo only, and the real run of 2026-10-11
+        // promptly produced a news post opening with "Passei o dia com a
+        // cabeca dividida entre um build de sistema financeiro e um link que
+        // apareceu no Hacker News".
+        var ep = episodicNarrative(text)
+        if (ep != "") {
+            problems.add("fidelidade: o texto narra um episodio em primeira pessoa ('" + ep + "') mas nenhum material desta pauta e um caso vivido — posicao registrada, leitura de repositorio e item consultado nao sao experiencia pessoal")
+        }
+
+        // -- first-person ACTIONS: claiming to have DONE the work. The projects
+        // pauta is a read-only analysis of a repository; nothing in it
+        // establishes that the author wrote, merged or ran anything. This is
+        // the same invention as an episode, stated as an accomplishment instead
+        // of a day.
+        var acted = firstPersonAction(text)
+        if (acted != "") {
+            problems.add("fidelidade: o texto afirma em primeira pessoa que a autora fez algo ('" + acted + "') mas o material desta pauta e leitura — nenhuma execucao, merge ou alteracao foi feita nem verificada aqui")
         }
 
         // -- reading claims: the publisher only ever holds the item's title,
@@ -721,6 +1284,62 @@ class Editorial {
         var readClaim = readingClaim(text)
         if (readClaim != "") {
             problems.add("fidelidade: o texto afirma ter lido a fonte ('" + readClaim + "') mas o material consultado e titulo, url, datas e resumo, nunca o texto integral")
+        }
+
+        // -- property claims: a post about a consulted tool may not assert a
+        // property the material never states. A blurb says what a project IS
+        // ("a dictation tool for Mac, open-source"); it does not say where it
+        // runs or how it works inside. Measured on the real run of 2026-10-11:
+        // handed "Show HN: BetterWispr – Free, open-source dictation for Mac",
+        // the generator wrote that the tool "roda no dispositivo, sem enviar
+        // audio para servidores externos" — a privacy architecture nobody
+        // stated, asserted as the reason the news mattered.
+        if (origin == "research") {
+            var corpus = sourceCorpus(sources)
+            var normProp = strings.toSnakeCase(asciiFold(text))
+            for (var pc in propertyClaims()) {
+                var needle = strings.toSnakeCase(asciiFold(pc.phrase()))
+                if (normProp.indexOf(needle) >= 0) {
+                    var key = strings.toSnakeCase(asciiFold(pc.key()))
+                    if (corpus.indexOf(key) < 0) {
+                        problems.add("fidelidade: o texto afirma que o item '" + pc.phrase() + "' mas o material consultado (titulo e resumo) nao diz isso — nao descreva o mecanismo nem onde a ferramenta roda")
+                    }
+                }
+            }
+            // ... and the same rule for an asserted ABSENCE. The property list
+            // above only sees positive assertions; "sem camera, app instalado"
+            // claims a component is NOT needed, which is just as much a
+            // statement about the tool's architecture and just as unsupported
+            // when the blurb never mentions it. Measured on the real run of
+            // 2026-10-11 (the colour-picker post).
+            var absent = absenceClaim(text, corpus)
+            if (absent != "") {
+                problems.add("fidelidade: o texto afirma que o item dispensa '" + absent + "' mas o material consultado (titulo e resumo) nao menciona isso — ausencia tambem e afirmacao sobre o mecanismo")
+            }
+            // ... and third-party REACTIONS. The material is a title, a url, a
+            // date and (at most) the source's own blurb; it carries no reader
+            // response, no comment section and no "narrative" around the item.
+            // Measured on the real run of 2026-10-11: a news draft about a
+            // blogger's post asserted "a reacao de quem leu isso como se fosse
+            // uma tragedia" and a "narrativa de sumico" — neither exists in a
+            // title plus a point count.
+            var reacted = reactionClaim(text)
+            if (reacted != "") {
+                problems.add("fidelidade: o texto descreve uma reacao de terceiros ('" + reacted + "') mas o material consultado e titulo, url, data e resumo — nao ha comentarios nem repercussao registrados")
+            }
+        }
+
+        // -- verification results: a repository pauta is a READ. Nothing was
+        // built, run or tested here, and the repository analysis says so
+        // ("verificado_aqui=nao"). So a post may report what the code CONTAINS
+        // and what the docs CLAIM, but not that the code compiles, runs or
+        // passes tests. Measured on the real run of 2026-10-11: the projects
+        // post closed with "a prova de que o codigo compila".
+        if (origin == "repo") {
+            var vc = unverifiedClaim(text)
+            if (vc != "") {
+                problems.add("fidelidade: o texto afirma que a verificacao aconteceu ('" + vc + "') mas nada foi executado aqui — o material e leitura do repositorio, nao um resultado de build ou de teste")
+            }
         }
 
         if (problems.size() > 0) {

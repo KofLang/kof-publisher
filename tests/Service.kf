@@ -216,3 +216,140 @@ test "service: concurrent starts launch exactly one daemon" {
     assert(exitOf(stop) == 0, stop)
     forceCleanup("svc-race")
 }
+
+// ---------------------------------------------------------------------------
+// REGRESSION (Fase 8): the DAEMON does research, not only the manual `plan`.
+//
+// The daemon used to generate from the profile and the GitHub digest alone —
+// `runOccurrence` never called the research pipeline, so a clock that fires at
+// 12:00 would produce a "news" post without ever consulting a current source,
+// and would record no pauta for the next cycle to avoid repeating. Both are
+// required of the recurring service, so this test pins them down.
+//
+// The occurrence is forced to fire immediately by moving the schedule's
+// next_execution into the past AFTER `sync` computed it: deterministic, no
+// sleeping until a wall-clock slot.
+// ---------------------------------------------------------------------------
+
+String startResearch(String name, String port, String mode) {
+    runCmd("pkill -f 'fake_researc[h].py " + port + "' || true; true")
+    var up = runCmd("{ python3 '" + publisherDir() + "/tests/fake_research.py' " + port + " " + mode + " > '" + workDir(name) + "/rs.log' 2>&1 & echo $! > '" + workDir(name) + "/rs.pid'; }; sleep 1; curl -s -m 4 http://127.0.0.1:" + port + "/health")
+    assert(exitOf(up) == 0 && outOf(up).trim() == "ok", up)
+    return outOf(up)
+}
+
+void stopResearch(String name) {
+    runCmd("kill $(cat '" + workDir(name) + "/rs.pid') 2>/dev/null || true")
+}
+
+String startLm(String name, String port) {
+    runCmd("pkill -f 'fake_lm_persona[l].py " + port + "' || true; true")
+    var up = runCmd("{ python3 '" + publisherDir() + "/tests/fake_lm_personal.py' " + port + " distinct > '" + workDir(name) + "/lm.log' 2>&1 & echo $! > '" + workDir(name) + "/lm.pid'; }; sleep 1; curl -s -m 4 http://127.0.0.1:" + port + "/api/tags | grep -c models")
+    assert(exitOf(up) == 0 && outOf(up).trim() == "1", up)
+    return outOf(up)
+}
+
+void stopLm(String name) {
+    runCmd("kill $(cat '" + workDir(name) + "/lm.pid') 2>/dev/null || true")
+}
+
+// A one-category profile whose only slot is the news slot, plus the schedule
+// that fires it.
+String researchCompany() {
+    var c = "# company\nname: Daemon Pesquisa\n\n# topics\ntopics:\n  - engenharia de software\n\n"
+    c = c + "# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\ntarget: linkedin\n\n"
+    c = c + "# editorial\nrequire_material: true\nresearch:\n  - hackernews\n  - devto\nresearch_max_age_hours: 168\nretention_records: 10000\nretention_max_gb: 20\n\n"
+    c = c + "# category noon\nclock: 12:00\nlabel: noticia\nfunction: noticias\nangle: noticia recente\n\n"
+    c = c + "# schedule noon\ndays:\n  - mon\n  - tue\n  - wed\n  - thu\n  - fri\n  - sat\n  - sun\nat: 12:00\nmode: assisted\ntarget: linkedin\n"
+    return c
+}
+
+// The CLI with the research + LM fixtures wired in, so the DAEMON (which
+// inherits this process's environment) reaches them too.
+String cliFixtures(String name, String rsPort, String lmPort, String args) {
+    var base = "http://127.0.0.1:" + rsPort
+    var cmd = "cd '" + workDir(name) + "' && KOF_PUBLISHER_HOME='" + workDir(name) + "/home'"
+        + " KOF_RESEARCH_HN_API='" + base + "/hn'"
+        + " KOF_RESEARCH_DEVTO_API='" + base + "/devto'"
+        + " KOF_RESEARCH_LOBSTERS_API='" + base + "/lobsters'"
+        + " KOF_RESEARCH_TIMEOUT=10"
+        + " KOF_LM_URL=http://127.0.0.1:" + lmPort + " KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25"
+        + " timeout 60 java -cp '" + classpath() + "' Default.Main " + args + " 2>&1"
+    var r = process.run("sh", "-c", cmd)
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+test "service: a fired occurrence runs the research pipeline and records the pauta" {
+    // A previous failing run may have leaked a daemon holding this workdir (the
+    // assertions below cannot use try/finally in this harness). Kill it first so
+    // a stale process cannot write into the database this run recreates.
+    runCmd("for p in $(pgrep -f 'Default.Main daemo[n]'); do d=$(readlink /proc/$p/cwd 2>/dev/null); if [ \"$d\" = '" + workDir("svc-research") + "' ]; then kill -9 $p 2>/dev/null || true; fi; done; true")
+    prepare("svc-research")
+    File(workDir("svc-research") + "/company.kofmd").writeText(researchCompany())
+    startResearch("svc-research", "11960", "normal")
+    startLm("svc-research", "11961")
+
+    // the agenda exists first (sync), then its next_execution is moved into the
+    // RECENT past so the daemon sees it as due on its very first loop. It has
+    // to be RECENT: recovery deliberately treats an instant overdue by more
+    // than 10 minutes as stale and recomputes it forward (a restart must not
+    // replay a long-dead slot), so a far-past stamp would be silently reset.
+    var sync = cliFixtures("svc-research", "11960", "11961", "sync --company company.kofmd --store pub.db")
+    assert(exitOf(sync) == 0, sync)
+    var moved = runCmd("python3 -c \"import sqlite3,datetime; tz=datetime.timezone(datetime.timedelta(hours=-3)); t=(datetime.datetime.now(tz)-datetime.timedelta(minutes=2)).strftime('%Y-%m-%dT%H:%M:%S-03:00'); c=sqlite3.connect('" + workDir("svc-research") + "/pub.db'); c.execute(\\\"update schedule set next_execution=? where name='noon'\\\", (t,)); c.commit(); print(t)\"")
+    assert(has(outOf(moved), "-03:00"), "schedule was not moved into the recent past:\n" + moved)
+
+    var s = cliFixtures("svc-research", "11960", "11961", "start --company company.kofmd --store pub.db")
+    assert(exitOf(s) == 0, s)
+    assert(has(outOf(s), "publisher iniciado"), s)
+
+    // Wait for the occurrence to be COMPLETE, not merely started: the research
+    // line is logged before generation, and the pauta/publication asserted
+    // below only exist once the whole pipeline has run. The end marker is the
+    // "-> review" line the daemon writes after recording the occurrence.
+    var logPath = workDir("svc-research") + "/home/publisher.log"
+    var waited = 0
+    var fired = ""
+    while (waited < 90000) {
+        // `; true` and not `|| echo 0`: grep -c PRINTS "0" and exits nonzero on
+        // no match, so the `||` form emits "0\n0" and the loop would break on
+        // the first iteration, before the daemon ever wrote the line.
+        fired = runCmd("grep -c \"ocorrencia noon@.* -> review\" '" + logPath + "' 2>/dev/null; true")
+        if (outOf(fired).trim() != "0") {
+            break
+        }
+        runCmd("sleep 2")
+        waited = waited + 2000
+    }
+    var log = runCmd("cat '" + logPath + "' 2>/dev/null")
+    var logOut = outOf(log)
+    // 1. the DAEMON consulted the sources (this is the regression)
+    assert(has(logOut, "pesquisa 12:00:"), "daemon never ran research:\n" + logOut)
+    // 2. it did not fabricate when a source failed: the note names the source
+    assert(has(logOut, "hackernews") || has(logOut, "devto"), logOut)
+
+    // 3. the occurrence is in the ledger, and it is in REVIEW (assisted mode)
+    var hist = cliFixtures("svc-research", "11960", "11961", "history --store pub.db")
+    assert(exitOf(hist) == 0, hist)
+    assert(has(outOf(hist), "noon"), outOf(hist))
+
+    var st = cliFixtures("svc-research", "11960", "11961", "db-stats --company company.kofmd --store pub.db")
+    var stOut = outOf(st)
+    assert(has(stOut, "ocorrencias  : 1"), stOut)
+    // the pauta behind the draft was persisted -> the next cycle can see the
+    // topic was already used (this is the memory the daemon previously lacked)
+    assert(has(stOut, "pautas       : 1"), stOut)
+    assert(has(stOut, "fontes       : "), stOut)
+
+    // 4. nothing was published, and the mode is still assisted
+    var pub = cliFixtures("svc-research", "11960", "11961", "list --status published --company company.kofmd --store pub.db")
+    assert(has(outOf(pub), "nenhuma"), pub)
+    var status = cliFixtures("svc-research", "11960", "11961", "status --company company.kofmd --store pub.db")
+    assert(has(outOf(status), "publicacao   : ASSISTIDA"), outOf(status))
+
+    var stop = cliFixtures("svc-research", "11960", "11961", "stop")
+    assert(exitOf(stop) == 0, stop)
+    forceCleanup("svc-research")
+    stopLm("svc-research")
+    stopResearch("svc-research")
+}

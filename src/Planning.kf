@@ -581,6 +581,57 @@ PlanCandidate bestOf(List<PlanCandidate> scored) {
     return best
 }
 
+// The ranked pool for one editorial function, best first, minus the topic keys
+// already taken. Used to try the NEXT candidate when the first pick's draft
+// fails the factual gate: the rule is "busque outra pauta" when a piece of
+// material cannot be written honestly, not "leave the slot empty". Measured on
+// the real run of 2026-10-11, where the news model kept inventing an absence
+// about one item and the slot produced nothing while 39 other candidates sat
+// unused.
+List<PlanCandidate> planAlternates(Company company, Store store, ResearchRun research, Int repoMaxAgeDays, List<String> recentThemes, String job, List<String> usedKeys) {
+    var pool = listOf<PlanCandidate>()
+    if (job == "projetos") {
+        pool = planRepoCandidates(store, repoMaxAgeDays)
+    } else {
+        if (job == "noticias") {
+            pool = planResearchCandidates(research, company.researchMaxAgeHours())
+        } else {
+            pool = planOpinionCandidates(company, job)
+        }
+    }
+    var scored = listOf<PlanCandidate>()
+    for (var c in pool) {
+        var s = scoreCandidate(company, c, recentThemes)
+        var taken = false
+        for (var k in usedKeys) {
+            if (k == s.topic_key()) {
+                taken = true
+            }
+        }
+        if (!taken) {
+            scored.add(s)
+        }
+    }
+    // selection sort, descending by score — the pool is small (tens of items)
+    var out = listOf<PlanCandidate>()
+    var remaining = scored
+    while (remaining.size() > 0) {
+        var best = bestOf(remaining)
+        var next = listOf<PlanCandidate>()
+        var removed = false
+        for (var c in remaining) {
+            if (!removed && c.topic_key() == best.topic_key()) {
+                removed = true
+            } else {
+                next.add(c)
+            }
+        }
+        out.add(best)
+        remaining = next
+    }
+    return out
+}
+
 // Build the plan: one choice per slot, in slot order. Slots that cannot be
 // filled honestly come back with chosen=false and a reason.
 PlanSet buildPlan(Company company, Store store, ResearchRun research, Int repoMaxAgeDays, List<String> recentThemes) {

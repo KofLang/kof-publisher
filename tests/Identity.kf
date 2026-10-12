@@ -173,3 +173,37 @@ test "identity: a claim to have read the source is discarded (only the headline 
     assert(has(out, "1 descartada(s) pela validacao"), out)
     stopLm("id-readclaim")
 }
+
+test "identity: an episode told with a retrospective verb is discarded too" {
+    prepare("id-retro")
+    // The projects slot is grounded in a REPOSITORY READ, not in anything the
+    // author did. "o fix me fez parar e reler a documentacao" narrates a lived
+    // episode just as plainly as "passei a tarde" — measured on the real run of
+    // 2026-10-11, where this exact shape slipped past the first phrase list.
+    var company = "# company\nname: Retro\n\n# topics\ntopics:\n  - engenharia\n\n# opinions\nopinions:\n  - prefere complexidade justificada a complexidade de moda\n\n# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\n\n# category morning\nclock: 06:00\nlabel: contraponto\nfunction: contraponto\n\n# editorial\nrequire_material: true\n"
+    File(workDir("id-retro") + "/company.kofmd").writeText(company)
+    startLm("id-retro", "11605", "retroepisode")
+
+    var p = cli("id-retro", "11605", "plan --no-research --company company.kofmd --store pub.db")
+    var out = outOf(p)
+    assert(has(out, "narra um episodio em primeira pessoa"), out)
+    assert(has(out, "1 descartada(s) pela validacao"), out)
+    stopLm("id-retro")
+}
+
+test "identity: a claim to have DONE the work is discarded (the material is a read)" {
+    prepare("id-action")
+    // The projects pauta is a read-only analysis: nothing in it establishes
+    // that the author merged, adjusted or ran anything. Measured on the real
+    // run of 2026-10-11, where the projects post opened with "Fiz um merge no
+    // kofbank" — the same invention as an episode, told as an accomplishment.
+    var company = "# company\nname: Acao\n\n# topics\ntopics:\n  - engenharia\n\n# opinions\nopinions:\n  - prefere complexidade justificada a complexidade de moda\n\n# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\n\n# category morning\nclock: 06:00\nlabel: contraponto\nfunction: contraponto\n\n# editorial\nrequire_material: true\n"
+    File(workDir("id-action") + "/company.kofmd").writeText(company)
+    startLm("id-action", "11606", "actionclaim")
+
+    var p = cli("id-action", "11606", "plan --no-research --company company.kofmd --store pub.db")
+    var out = outOf(p)
+    assert(has(out, "afirma em primeira pessoa que a autora fez algo"), out)
+    assert(has(out, "1 descartada(s) pela validacao"), out)
+    stopLm("id-action")
+}

@@ -104,6 +104,15 @@ void stopLm(String name) {
     runCmd("kill $(cat '" + workDir(name) + "/lm.pid') 2>/dev/null || true")
 }
 
+// The same LM fixture in an explicit reply mode (the default above is
+// "distinct"), for tests that need one specific draft shape.
+String startLmMode(String name, String port, String mode) {
+    runCmd("pkill -f 'fake_lm_persona[l].py " + port + "' || true; true")
+    var up = runCmd("cd '" + workDir(name) + "' && { python3 '" + publisherDir() + "/tests/fake_lm_personal.py' " + port + " " + mode + " > lm.log 2>&1 & echo $! > lm.pid; }; sleep 1; curl -s -m 4 http://127.0.0.1:" + port + "/api/tags | grep -c models")
+    assert(exitOf(up) == 0, up)
+    return outOf(up)
+}
+
 // Full pipeline: research fixture + LM fixture, pointed at via env.
 String cliPlan(String name, String rsPort, String lmPort, String args) {
     var base = "http://127.0.0.1:" + rsPort
@@ -372,4 +381,260 @@ test "integration: research + github + profile fill all four functions into REVI
 
     stopLm("pl-integ")
     stopResearch("pl-integ")
+}
+
+test "plan: a news post may not assert a property the source never stated" {
+    prepare("pl-prop")
+    // Only the news slot: the profile-sourced slots would generate from the
+    // same fixture text and muddy which check fired.
+    var company = "# company\nname: Propriedade\n\n# topics\ntopics:\n  - engenharia de software\n\n# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\ntarget: linkedin\n\n# editorial\nrequire_material: true\nresearch:\n  - hackernews\nresearch_max_age_hours: 168\n\n# category noon\nclock: 12:00\nlabel: noticia de tecnologia\nfunction: noticias\nangle: noticia recente\n"
+    File(workDir("pl-prop") + "/company.kofmd").writeText(company)
+    startResearch("pl-prop", "11980", "normal")
+    startLmMode("pl-prop", "11981", "localclaim")
+
+    var p = cliPlan("pl-prop", "11980", "11981", "plan --company company.kofmd --store pub.db")
+    // Nonzero exit is the HONEST outcome here: the only proposal was discarded,
+    // so the command reports failure rather than pretending it produced a plan.
+    assert(exitOf(p) != 0, p)
+    var out = outOf(p)
+    // The fixture asserts the tool "roda no dispositivo e processa tudo
+    // localmente". The consulted blurb says only "88 pontos na front page", so
+    // the property is ungrounded and the draft is kept in REVIEW with the
+    // caveat rather than passing as validated.
+    assert(has(out, "nao descreva o mecanismo nem onde a ferramenta roda"), out)
+    assert(has(out, "1 descartada(s) pela validacao"), out)
+    // it is still stored for human review, and never approved or published
+    var rev = cliPlan("pl-prop", "11980", "11981", "list --status review --company company.kofmd --store pub.db")
+    assert(has(outOf(rev), "pub-"), rev)
+    var pub = cliPlan("pl-prop", "11980", "11981", "list --status published --company company.kofmd --store pub.db")
+    assert(has(outOf(pub), "nenhuma"), pub)
+    stopLm("pl-prop")
+    stopResearch("pl-prop")
+}
+
+test "plan: a news post may not narrate the author's day around the item" {
+    prepare("pl-newsep")
+    var company = "# company\nname: EpisodioNoticia\n\n# topics\ntopics:\n  - engenharia de software\n\n# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\ntarget: linkedin\n\n# editorial\nrequire_material: true\nresearch:\n  - hackernews\nresearch_max_age_hours: 168\n\n# category noon\nclock: 12:00\nlabel: noticia de tecnologia\nfunction: noticias\nangle: noticia recente\n"
+    File(workDir("pl-newsep") + "/company.kofmd").writeText(company)
+    startResearch("pl-newsep", "11982", "normal")
+    startLmMode("pl-newsep", "11983", "newsepisode")
+
+    // The episode check used to run only for profile/repo pautas, so a news
+    // draft could open with "Passei o dia..." and pass. A consulted item is
+    // material; the day the author supposedly spent with it is not.
+    var p = cliPlan("pl-newsep", "11982", "11983", "plan --company company.kofmd --store pub.db")
+    var out = outOf(p)
+    assert(has(out, "narra um episodio em primeira pessoa"), out)
+    assert(has(out, "1 descartada(s) pela validacao"), out)
+    var pub = cliPlan("pl-newsep", "11982", "11983", "list --status published --company company.kofmd --store pub.db")
+    assert(has(outOf(pub), "nenhuma"), pub)
+    stopLm("pl-newsep")
+    stopResearch("pl-newsep")
+}
+
+test "plan: a projects post may not claim the tests guarantee something" {
+    prepare("pl-testclaim")
+    // The repository analysis records only that test files EXIST and that
+    // nothing was executed here. "os testes validam invariantes" is therefore
+    // an unsupported upgrade — the exact one the profile's rule forbids
+    // ("um teste existente nao prova qualidade"), measured on the real run of
+    // 2026-10-11.
+    File(workDir("pl-testclaim") + "/company.kofmd").writeText(integrationCompany())
+    startGithubFixture("pl-testclaim", "12020", "normal")
+    startResearch("pl-testclaim", "12021", "normal")
+    startLmMode("pl-testclaim", "12022", "testclaim")
+
+    var g = runCmd("cd '" + workDir("pl-testclaim") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-testclaim") + "/home' KOF_GITHUB_API=http://127.0.0.1:12020 java -cp '" + classpath() + "' Default.Main github --limit 10 --company company.kofmd --store pub.db")
+    assert(exitOf(g) == 0, g)
+    stopGithubFixture("pl-testclaim")
+
+    var base = "http://127.0.0.1:12021"
+    var cmd = "cd '" + workDir("pl-testclaim") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-testclaim") + "/home'"
+        + " KOF_RESEARCH_HN_API='" + base + "/hn' KOF_RESEARCH_DEVTO_API='" + base + "/devto' KOF_RESEARCH_TIMEOUT=10"
+        + " KOF_LM_URL=http://127.0.0.1:12022 KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25"
+        + " java -cp '" + classpath() + "' Default.Main plan --company company.kofmd --store pub.db 2>&1"
+    var p = runCmd(cmd)
+    var out = outOf(p)
+    assert(has(out, "o texto afirma que os testes garantem algo"), out)
+    // the projects slot is the one that fails; the other three still produce
+    assert(has(out, "1 descartada(s) pela validacao"), out)
+    assert(has(out, "3 proposta(s) em REVIEW"), out)
+    stopLm("pl-testclaim")
+    stopResearch("pl-testclaim")
+}
+
+test "plan: a denial in one clause does not excuse a guarantee in another" {
+    prepare("pl-testclaim-denial")
+    // The real draft of 2026-10-11 wrote the guarantee and the denial into the
+    // SAME sentence: "... os testes presentes no repositorio validam
+    // invariantes ..., mas nao cobrem todo o fluxo de pagamento ...". Matching
+    // at sentence level saw "nao cobrem" and skipped the sentence whole, so the
+    // unverifiable guarantee in the first clause passed. The check now splits
+    // at the contrastive conjunction, so each clause is judged on its own.
+    File(workDir("pl-testclaim-denial") + "/company.kofmd").writeText(integrationCompany())
+    startGithubFixture("pl-testclaim-denial", "12030", "normal")
+    startResearch("pl-testclaim-denial", "12031", "normal")
+    startLmMode("pl-testclaim-denial", "12032", "testclaimdenial")
+
+    var g = runCmd("cd '" + workDir("pl-testclaim-denial") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-testclaim-denial") + "/home' KOF_GITHUB_API=http://127.0.0.1:12030 java -cp '" + classpath() + "' Default.Main github --limit 10 --company company.kofmd --store pub.db")
+    assert(exitOf(g) == 0, g)
+    stopGithubFixture("pl-testclaim-denial")
+
+    var base = "http://127.0.0.1:12031"
+    var cmd = "cd '" + workDir("pl-testclaim-denial") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-testclaim-denial") + "/home'"
+        + " KOF_RESEARCH_HN_API='" + base + "/hn' KOF_RESEARCH_DEVTO_API='" + base + "/devto' KOF_RESEARCH_TIMEOUT=10"
+        + " KOF_LM_URL=http://127.0.0.1:12032 KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25"
+        + " java -cp '" + classpath() + "' Default.Main plan --company company.kofmd --store pub.db 2>&1"
+    var p = runCmd(cmd)
+    var out = outOf(p)
+    assert(has(out, "o texto afirma que os testes garantem algo"), out)
+    assert(has(out, "1 descartada(s) pela validacao"), out)
+    assert(has(out, "3 proposta(s) em REVIEW"), out)
+    stopLm("pl-testclaim-denial")
+    stopResearch("pl-testclaim-denial")
+}
+
+test "plan: a news post may not assert an absence the source never states" {
+    prepare("pl-absence")
+    // The consulted item says only "never needs the internet". The post adds
+    // "sem depender de camera, app instalado ou conexao" — two components the
+    // material never mentions, asserted as absent. The property list is
+    // positive-only, so a denial slipped past it; measured verbatim from
+    // pub-12-00-noon-22f8ee51 on the real run of 2026-10-11.
+    File(workDir("pl-absence") + "/company.kofmd").writeText(integrationCompany())
+    startGithubFixture("pl-absence", "12040", "normal")
+    startResearch("pl-absence", "12041", "normal")
+    startLmMode("pl-absence", "12042", "absenceclaim")
+
+    var g = runCmd("cd '" + workDir("pl-absence") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-absence") + "/home' KOF_GITHUB_API=http://127.0.0.1:12040 java -cp '" + classpath() + "' Default.Main github --limit 10 --company company.kofmd --store pub.db")
+    assert(exitOf(g) == 0, g)
+    stopGithubFixture("pl-absence")
+
+    var base = "http://127.0.0.1:12041"
+    var cmd = "cd '" + workDir("pl-absence") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-absence") + "/home'"
+        + " KOF_RESEARCH_HN_API='" + base + "/hn' KOF_RESEARCH_DEVTO_API='" + base + "/devto' KOF_RESEARCH_TIMEOUT=10"
+        + " KOF_LM_URL=http://127.0.0.1:12042 KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25"
+        + " java -cp '" + classpath() + "' Default.Main plan --company company.kofmd --store pub.db 2>&1"
+    var p = runCmd(cmd)
+    var out = outOf(p)
+    assert(has(out, "o texto afirma que o item dispensa"), out)
+    assert(has(out, "1 descartada(s) pela validacao"), out)
+    assert(has(out, "3 proposta(s) em REVIEW"), out)
+    stopLm("pl-absence")
+    stopResearch("pl-absence")
+}
+
+test "plan: a projects post may not claim the build was verified" {
+    prepare("pl-unverified")
+    // The repository analysis records verified_build=false and says "nada foi
+    // executado aqui". "o codigo compila" is therefore an unproduced result.
+    // Measured from pub-06-00-morning-de2a104a on the real run of 2026-10-11.
+    // Distinct from the test-guarantee case: this one claims the build
+    // HAPPENED, not that the tests prove something.
+    File(workDir("pl-unverified") + "/company.kofmd").writeText(integrationCompany())
+    startGithubFixture("pl-unverified", "12050", "normal")
+    startResearch("pl-unverified", "12051", "normal")
+    startLmMode("pl-unverified", "12052", "unverifiedclaim")
+
+    var g = runCmd("cd '" + workDir("pl-unverified") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-unverified") + "/home' KOF_GITHUB_API=http://127.0.0.1:12050 java -cp '" + classpath() + "' Default.Main github --limit 10 --company company.kofmd --store pub.db")
+    assert(exitOf(g) == 0, g)
+    stopGithubFixture("pl-unverified")
+
+    var base = "http://127.0.0.1:12051"
+    var cmd = "cd '" + workDir("pl-unverified") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-unverified") + "/home'"
+        + " KOF_RESEARCH_HN_API='" + base + "/hn' KOF_RESEARCH_DEVTO_API='" + base + "/devto' KOF_RESEARCH_TIMEOUT=10"
+        + " KOF_LM_URL=http://127.0.0.1:12052 KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25"
+        + " java -cp '" + classpath() + "' Default.Main plan --company company.kofmd --store pub.db 2>&1"
+    var p = runCmd(cmd)
+    var out = outOf(p)
+    assert(has(out, "o texto afirma que a verificacao aconteceu"), out)
+    assert(has(out, "1 descartada(s) pela validacao"), out)
+    assert(has(out, "3 proposta(s) em REVIEW"), out)
+    stopLm("pl-unverified")
+    stopResearch("pl-unverified")
+}
+
+test "plan: a news post may not assert a third-party reaction the source never shows" {
+    prepare("pl-reaction")
+    // The material is a title, a url, a date and a point count. It has no
+    // comment section and no reader response, so "a reacao de quem leu isso"
+    // and a "narrativa de sumico" describe something nobody read. Measured
+    // from the real run of 2026-10-11.
+    File(workDir("pl-reaction") + "/company.kofmd").writeText(integrationCompany())
+    startGithubFixture("pl-reaction", "12060", "normal")
+    startResearch("pl-reaction", "12061", "normal")
+    startLmMode("pl-reaction", "12062", "reactionclaim")
+
+    var g = runCmd("cd '" + workDir("pl-reaction") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-reaction") + "/home' KOF_GITHUB_API=http://127.0.0.1:12060 java -cp '" + classpath() + "' Default.Main github --limit 10 --company company.kofmd --store pub.db")
+    assert(exitOf(g) == 0, g)
+    stopGithubFixture("pl-reaction")
+
+    var base = "http://127.0.0.1:12061"
+    var cmd = "cd '" + workDir("pl-reaction") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-reaction") + "/home'"
+        + " KOF_RESEARCH_HN_API='" + base + "/hn' KOF_RESEARCH_DEVTO_API='" + base + "/devto' KOF_RESEARCH_TIMEOUT=10"
+        + " KOF_LM_URL=http://127.0.0.1:12062 KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25"
+        + " java -cp '" + classpath() + "' Default.Main plan --company company.kofmd --store pub.db 2>&1"
+    var p = runCmd(cmd)
+    var out = outOf(p)
+    assert(has(out, "o texto descreve uma reacao de terceiros"), out)
+    // the news slot keeps failing on every alternate, so it ends up empty;
+    // the other three still produce
+    assert(has(out, "3 proposta(s) em REVIEW"), out)
+    stopLm("pl-reaction")
+    stopResearch("pl-reaction")
+}
+
+test "plan: a projects post may not narrate an encounter with the repository" {
+    prepare("pl-encounter")
+    // "Peguei o projeto de volta pra mao ... me chamou atencao" is a lived
+    // encounter with something the publisher only READ. Measured from the real
+    // run of 2026-10-11.
+    File(workDir("pl-encounter") + "/company.kofmd").writeText(integrationCompany())
+    startGithubFixture("pl-encounter", "12070", "normal")
+    startResearch("pl-encounter", "12071", "normal")
+    startLmMode("pl-encounter", "12072", "encounter")
+
+    var g = runCmd("cd '" + workDir("pl-encounter") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-encounter") + "/home' KOF_GITHUB_API=http://127.0.0.1:12070 java -cp '" + classpath() + "' Default.Main github --limit 10 --company company.kofmd --store pub.db")
+    assert(exitOf(g) == 0, g)
+    stopGithubFixture("pl-encounter")
+
+    var base = "http://127.0.0.1:12071"
+    var cmd = "cd '" + workDir("pl-encounter") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-encounter") + "/home'"
+        + " KOF_RESEARCH_HN_API='" + base + "/hn' KOF_RESEARCH_DEVTO_API='" + base + "/devto' KOF_RESEARCH_TIMEOUT=10"
+        + " KOF_LM_URL=http://127.0.0.1:12072 KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25"
+        + " java -cp '" + classpath() + "' Default.Main plan --company company.kofmd --store pub.db 2>&1"
+    var p = runCmd(cmd)
+    var out = outOf(p)
+    assert(has(out, "narra um episodio em primeira pessoa"), out)
+    assert(has(out, "3 proposta(s) em REVIEW"), out)
+    stopLm("pl-encounter")
+    stopResearch("pl-encounter")
+}
+
+test "plan: a concessive clause does not excuse a test guarantee either" {
+    prepare("pl-embora")
+    // "os testes ... sao suficientes para garantir X, EMBORA nao substituam Y".
+    // Two gaps at once: the boundary was "embora" (not "mas") and the verb was
+    // the infinitive "garantir" (not "garantem"). Measured from the real run of
+    // 2026-10-11.
+    File(workDir("pl-embora") + "/company.kofmd").writeText(integrationCompany())
+    startGithubFixture("pl-embora", "12080", "normal")
+    startResearch("pl-embora", "12081", "normal")
+    startLmMode("pl-embora", "12082", "testclaimembora")
+
+    var g = runCmd("cd '" + workDir("pl-embora") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-embora") + "/home' KOF_GITHUB_API=http://127.0.0.1:12080 java -cp '" + classpath() + "' Default.Main github --limit 10 --company company.kofmd --store pub.db")
+    assert(exitOf(g) == 0, g)
+    stopGithubFixture("pl-embora")
+
+    var base = "http://127.0.0.1:12081"
+    var cmd = "cd '" + workDir("pl-embora") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-embora") + "/home'"
+        + " KOF_RESEARCH_HN_API='" + base + "/hn' KOF_RESEARCH_DEVTO_API='" + base + "/devto' KOF_RESEARCH_TIMEOUT=10"
+        + " KOF_LM_URL=http://127.0.0.1:12082 KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25"
+        + " java -cp '" + classpath() + "' Default.Main plan --company company.kofmd --store pub.db 2>&1"
+    var p = runCmd(cmd)
+    var out = outOf(p)
+    assert(has(out, "o texto afirma que os testes garantem algo"), out)
+    assert(has(out, "3 proposta(s) em REVIEW"), out)
+    stopLm("pl-embora")
+    stopResearch("pl-embora")
 }

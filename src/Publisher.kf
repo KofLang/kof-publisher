@@ -280,7 +280,13 @@ String planTopicFor(Category c) {
 // URL and dates — and it travels with its provenance, because the generator
 // must be able to tell documentation from verified behaviour.
 String planEvidenceBlock(Store store, PlanChoice ch, ResearchRun research) {
-    var c = ch.candidate()
+    return planEvidenceBlockFor(store, ch.candidate(), research)
+}
+
+// Same block, addressed by candidate. The retry path needs it: when the first
+// pick fails the factual gate the next candidate for the slot is tried, and by
+// then there is no PlanChoice carrying it.
+String planEvidenceBlockFor(Store store, PlanCandidate c, ResearchRun research) {
     var b = ""
     if (c.origin() == "repo") {
         var r = store.findRepoState(c.origin_ref())
@@ -293,6 +299,11 @@ String planEvidenceBlock(Store store, PlanChoice ch, ResearchRun research) {
             // limit where the model is actually reading is what holds the line.
             b = b + "LIMITE DESTE MATERIAL: a analise e SO LEITURA. Voce NAO executou nada, NAO rodou os testes e NAO verificou comportamento.\n"
             b = b + "Nao suba o nivel da afirmacao: 'ha arquivos de teste' nao e 'os testes cobrem ou garantem'; 'documentado' nao e 'verificado rodando'.\n"
+            // The level rule above is stated in the abstract, and the model
+            // still closed the real run of 2026-10-11 with "a prova de que o
+            // codigo compila". Nothing was built here, so the concrete verbs
+            // have to be named.
+            b = b + "Nada foi COMPILADO, EXECUTADO ou TESTADO aqui: nao escreva que o codigo 'compila', 'roda', 'passa nos testes' ou 'funciona'. Diga o que o codigo contem e o que a documentacao afirma.\n"
             b = b + "Descreva o que mudou no PROJETO (o que o log e o README mostram), nao o que voce teria feito num dia especifico.\n"
             // The README states intentions in the future tense ("Kof is the
             // integration layer later", "the design targets z/OS"). The first
@@ -301,7 +312,7 @@ String planEvidenceBlock(Store store, PlanChoice ch, ResearchRun research) {
             // built, which is the same class of error as documented vs built.
             b = b + "O README diz o que o projeto PRETENDE, nao so o que ja existe: 'later', 'targets', 'design' e 'todo' sao PLANO, nao fato.\n"
             b = b + "Nao escreva que algo ja existe porque o README o descreve no presente; o que esta no log de commits e o que de fato aconteceu.\n"
-            b = b + "Proibido narrar episodio: 'passei a manha/tarde olhando', 'me deparei com', 'ontem eu', 'tive que'.\n"
+            b = b + "Proibido narrar episodio: 'passei a manha/tarde olhando', 'me deparei com', 'ontem eu', 'tive que', 'peguei o projeto de volta', 'me chamou atencao', 'voltei a mexer'.\n"
         }
     } else {
         if (c.origin() == "profile") {
@@ -349,6 +360,20 @@ String planEvidenceBlock(Store store, PlanChoice ch, ResearchRun research) {
             // describes a project, it does not disclose its implementation.
             b = b + "Nao descreva COMO a ferramenta funciona por dentro (arquitetura, sensores, algoritmos, bibliotecas, modelos) nem ONDE o projeto fica hospedado (GitHub, GitLab, pacote publicado) a menos que o resumo diga: o material nao contem isso.\n"
             b = b + "Voce pode comentar a IDEIA e o que ela muda; nao invente o mecanismo.\n"
+            // Asserting an ABSENCE ("nao precisa de camera nem de app") is the
+            // same statement about the mechanism, only negated, and the model
+            // did it on the real run of 2026-10-11 (a colour picker described
+            // as needing neither camera nor app, when the item says only that
+            // it needs no internet).
+            b = b + "Nao afirme que a ferramenta DISPENSA algo (camera, app, conta, servidor, conexao, assinatura) a menos que o titulo ou o resumo diga: ausencia tambem e afirmacao sobre o mecanismo.\n"
+            // The news slot was the last place an episode could still get in:
+            // the item is consulted, but the DAY the author supposedly spent
+            // with it is not in the material either.
+            b = b + "Nao narre o SEU dia nem a SUA rotina em volta da noticia: nada de 'passei o dia', 'no meu trabalho', 'vejo diariamente', 'na minha rotina'. Comente a noticia, nao o momento em que voce a viu.\n"
+            // The material has no comment section and no reader response. The
+            // model nevertheless asserted "a reacao de quem leu isso" and a
+            // "narrativa de sumico" on the real run of 2026-10-11.
+            b = b + "Nao descreva reacao, repercussao, recepcao ou 'narrativa' em volta do item: o material nao traz comentarios nem resposta do publico.\n"
         }
     }
     // An opinion slot deliberately gets NO attached headline. It was tried
@@ -363,17 +388,21 @@ String planEvidenceBlock(Store store, PlanChoice ch, ResearchRun research) {
 
 // The objective line that frames the slot for the generator.
 String planObjective(PlanChoice ch) {
-    var o = "funcao editorial deste horario: " + planFunctionLabel(ch.function())
-    if (ch.function() == "noticias") {
+    return planObjectiveFor(ch.function())
+}
+
+String planObjectiveFor(String function) {
+    var o = "funcao editorial deste horario: " + planFunctionLabel(function)
+    if (function == "noticias") {
         o = o + ". Escreva SOBRE a noticia, sustentando cada afirmacao factual no material fornecido; nao acrescente numero, data, nome ou promessa que nao esteja ali"
     }
-    if (ch.function() == "projetos") {
-        o = o + ". Escreva sobre o trabalho real do projeto, distinguindo o que esta documentado do que foi verificado"
+    if (function == "projetos") {
+        o = o + ". Escreva sobre o trabalho real do projeto, distinguindo o que esta documentado do que foi verificado. Nao transforme o texto em defesa de tecnologia antiga contra moderna"
     }
-    if (ch.function() == "contraponto") {
+    if (function == "contraponto") {
         o = o + ". Assuma uma posicao tecnica e sustente com argumento; discorde do hype, nao das pessoas"
     }
-    if (ch.function() == "observacao") {
+    if (function == "observacao") {
         o = o + ". Observacao, provocacao ou humor sobre o trabalho de engenharia; sem licao de moral"
     }
     return o
@@ -384,8 +413,14 @@ String planObjective(PlanChoice ch) {
 // repetition detection and later auditing possible — without it, the next run
 // would have no memory of the reasoning, only of the text.
 String persistPlanTopic(Store store, Company company, PlanChoice ch, String pubId, ResearchRun research, String now) {
-    var c = ch.candidate()
-    var tid = "top-" + ch.clock().replace(":", "") + "-" + strings.truncate(uuid.v4(), 8)
+    return persistPlanTopicFor(store, company, ch.candidate(), ch.function(), ch.clock(), pubId, research, now)
+}
+
+// Same, addressed by candidate + slot fields. The retry path persists the pauta
+// for whichever candidate actually produced the draft, which is not always the
+// one buildPlan chose.
+String persistPlanTopicFor(Store store, Company company, PlanCandidate c, String function, String clock, String pubId, ResearchRun research, String now) {
+    var tid = "top-" + clock.replace(":", "") + "-" + strings.truncate(uuid.v4(), 8)
     var arg = c.argument()
     var simHash = strings.truncate(strings.slugify(c.theme() + " " + arg), 60)
     store.saveTopic(TopicRecord(
@@ -393,7 +428,7 @@ String persistPlanTopic(Store store, Company company, PlanChoice ch, String pubI
         c.topic_key(),
         c.theme(),
         arg,
-        ch.function(),
+        function,
         c.origin_ref(),
         now,
         now,
@@ -421,6 +456,26 @@ String persistPlanTopic(Store store, Company company, PlanChoice ch, String pubI
             it.source_type()))
     }
     return tid
+}
+
+// Remove the day's four proposals from REVIEW so a re-run can replace them
+// without leaving superseded drafts in the queue. The PAUTAS and their sources
+// stay: they are the memory that keeps the next run from repeating a theme, and
+// the profile's instruction is explicit that the existing history is not to be
+// wiped. This touches only `review` rows whose target is `dryrun` (what the
+// editorial pipeline always writes) — anything a human already approved,
+// scheduled or published is never deleted.
+Int clearReviewDrafts(Store store) {
+    var drafts = store.publicationsByStatus(statusReview())
+    var removed = 0
+    for (var p in drafts) {
+        if (p.target() != "dryrun") {
+            continue
+        }
+        store.deleteDraft(p.id())
+        removed = removed + 1
+    }
+    return removed
 }
 
 // Record the outcome of the two validation gates on the pauta. Kept as a
@@ -458,6 +513,15 @@ Int cmdPlan(Store store, Company company, List<String> args) {
     }
     var sched = Scheduler(store, company)
     var now = sched.nowStamp()
+
+    // `--replace-review` swaps the day's drafts instead of stacking a second
+    // batch on top of the first. The pautas stay (they are the memory that
+    // prevents repetition); only the superseded review drafts go, and only the
+    // ones the editorial pipeline wrote.
+    if (hasFlag(args, "--replace-review")) {
+        var gone = clearReviewDrafts(store)
+        println("substituindo    : " + gone + " rascunho(s) anterior(es) em REVIEW removido(s); as pautas e o historico foram preservados")
+    }
 
     // ---- 1. research ----
     var sources = company.researchSources()
@@ -513,98 +577,164 @@ Int cmdPlan(Store store, Company company, List<String> args) {
             continue
         }
         var c = ch.candidate()
-        println(head + " ----")
-        println("tema: " + c.theme())
-        println("origem: " + c.origin() + "  " + c.origin_ref())
-        println("pontuacao: " + c.score() + "/100")
-        for (var sn in c.score_notes()) {
-            println("  " + sn)
+        // Try the planned candidate first; if its draft cannot be written
+        // honestly, try the next candidates for the same slot. The rule is
+        // explicit: when the material does not hold up, seek ANOTHER pauta
+        // rather than leave the slot empty. Measured on the real run of
+        // 2026-10-11: the news model kept inventing an absence about one item
+        // and the slot produced nothing while 39 other candidates sat unused.
+        var tries = listOf<PlanCandidate>()
+        tries.add(c)
+        var usedKeys = listOf<String>()
+        usedKeys.add(c.topic_key())
+        var alts = planAlternates(company, store, run, repoMaxAgeDays, recentThemes, ch.function(), usedKeys)
+        var ai = 0
+        while (ai < 3 && ai < alts.size()) {
+            // Quality floor. An alternate is only worth trying if it is still
+            // decent material: the retry exists to route around one item the
+            // model cannot write honestly, NOT to scrape the bottom of the pool.
+            // Measured on the real run of 2026-10-11: after four failures the
+            // projects slot fell through to a repo 445 days old (score 38,
+            // "antigo demais para passar como novidade") and published about it.
+            // Below the floor the slot is honestly empty, which is correct.
+            // The floor does NOT apply to profile candidates: an opinion has no
+            // date and no "freshness", so a registered position is always valid
+            // material even though it scores low on atualidade.
+            var alt = alts.get(ai)
+            if (alt.origin() != "profile" && alt.score() < 55) {
+                println("  (alternativa descartada por qualidade: " + alt.theme() + " — " + alt.score() + "/100)")
+                ai = ai + 1
+                continue
+            }
+            tries.add(alt)
+            ai = ai + 1
         }
-        println("evidencia: " + c.evidence())
+        var produced = false
+        var attempts = 0
+        // A draft that fails the factual gate is NOT persisted while the slot
+        // still has candidates to try: a rejected-and-replaced draft is not
+        // something a human should have to review, and the audit trail lives on
+        // the pauta (status + caveat). If EVERY candidate fails, the last
+        // failure is persisted so the block is visible in the queue instead of
+        // vanishing silently.
+        var lastFailDraft = ""
+        var lastFailId = ""
+        var lastFailTid = ""
+        var lastFailTheme = ""
+        for (var cand in tries) {
+            if (produced) {
+                continue
+            }
+            c = cand
+            attempts = attempts + 1
+            println(head + " ----")
+            if (attempts > 1) {
+                println("tentativa: " + attempts + " (a anterior nao passou na validacao factual; buscando outra pauta)")
+            }
+            println("tema: " + c.theme())
+            println("origem: " + c.origin() + "  " + c.origin_ref())
+            println("pontuacao: " + c.score() + "/100")
+            for (var sn in c.score_notes()) {
+                println("  " + sn)
+            }
+            println("evidencia: " + c.evidence())
 
-        var ed = Editorial(company)
-        var block = planEvidenceBlock(store, ch, run)
-        if (block != "") {
-            ed = ed.withExtra(block)
-        }
-        var draft = ""
-        var v = Validation(false, listOf<String>("nada gerado"), listOf<String>())
-        var round = 0
-        while (round < 3) {
-            try {
-                draft = ed.generateIn(c.theme(), recent, planObjective(ch), ch.label(), ch.angle())
-            } catch (String e) {
-                if (e.startsWith("SKIP") || e.startsWith("LAB-SKIP")) {
-                    println("resultado: SKIP — " + e)
-                    println("")
-                    skipped = skipped + 1
-                    draft = ""
+            var ed = Editorial(company)
+            var block = planEvidenceBlockFor(store, c, run)
+            if (block != "") {
+                ed = ed.withExtra(block)
+            }
+            var draft = ""
+            var v = Validation(false, listOf<String>("nada gerado"), listOf<String>())
+            var round = 0
+            while (round < 3) {
+                try {
+                    draft = ed.generateIn(c.theme(), recent, planObjectiveFor(ch.function()), ch.label(), ch.angle())
+                } catch (String e) {
+                    if (e.startsWith("SKIP") || e.startsWith("LAB-SKIP")) {
+                        println("resultado: SKIP — " + e)
+                        println("")
+                        draft = ""
+                        break
+                    }
+                    throw e
+                }
+                v = ed.validate(draft, recent)
+                if (v.ok()) {
                     break
                 }
-                throw e
-            }
-            v = ed.validate(draft, recent)
-            if (v.ok()) {
-                break
-            }
-            draft = ed.reviseIn(draft, v, recent, ch.label(), ch.angle())
-            var v2 = ed.validate(draft, recent)
-            if (v2.ok()) {
+                draft = ed.reviseIn(draft, v, recent, ch.label(), ch.angle())
+                var v2 = ed.validate(draft, recent)
+                if (v2.ok()) {
+                    v = v2
+                    break
+                }
                 v = v2
-                break
+                round = round + 1
             }
-            v = v2
-            round = round + 1
-        }
-        if (draft == "") {
-            continue
-        }
-        if (!v.ok()) {
-            println("resultado: DESCARTADO pela validacao")
-            println(joinList(v.problems()))
-            println("")
-            invalid = invalid + 1
-            continue
-        }
-        var id = "pub-" + strings.slugify(ch.clock()) + "-" + strings.slugify(ch.category_name()) + "-" + strings.truncate(uuid.v4(), 8)
-        var tid = persistPlanTopic(store, company, ch, id, run, now)
-        var srcs = store.sourcesByTopic(tid)
-        // Second gate: the mechanical FACTUAL proxy, run against the sources
-        // that were actually persisted for this pauta. Editorial quality and
-        // factual grounding are separate questions and are checked separately.
-        var fc = ed.validateFactual(draft, srcs, c.origin(), c.published_at(), c.evidence())
-        if (!fc.ok()) {
-            // The pauta was persisted but the draft is not publishable: record
-            // it as a REVIEW item with the problem, never as approved.
+            if (draft == "") {
+                continue
+            }
+            if (!v.ok()) {
+                println("resultado: DESCARTADO pela validacao")
+                println(joinList(v.problems()))
+                println("")
+                continue
+            }
+            var id = "pub-" + strings.slugify(ch.clock()) + "-" + strings.slugify(ch.category_name()) + "-" + strings.truncate(uuid.v4(), 8)
+            var tid = persistPlanTopicFor(store, company, c, ch.function(), ch.clock(), id, run, now)
+            var srcs = store.sourcesByTopic(tid)
+            // Second gate: the mechanical FACTUAL proxy, run against the
+            // sources that were actually persisted for this pauta. Editorial
+            // quality and factual grounding are separate questions and are
+            // checked separately.
+            var fc = ed.validateFactual(draft, srcs, c.origin(), c.published_at(), c.evidence())
+            if (!fc.ok()) {
+                // The pauta records the outcome and the caveat; the draft is
+                // held back until we know no candidate for this slot survives.
+                markTopicOutcome(store, tid, "review-com-ressalva", joinList(fc.problems()))
+                lastFailDraft = draft
+                lastFailId = id
+                lastFailTid = tid
+                lastFailTheme = c.theme()
+                for (var fp in fc.problems()) {
+                    println("  problema: " + fp)
+                }
+                for (var fw in fc.warnings()) {
+                    println("  warn: " + fw)
+                }
+                println("")
+                continue
+            }
             store.savePublication(Publication(id, company.name(), c.theme(), draft, statusReview(), now, "", "", "dryrun", lmModel(), company.digest(), "", "", "", id, 0, tid))
-            markTopicOutcome(store, tid, "review-com-ressalva", joinList(fc.problems()))
-            for (var fp in fc.problems()) {
-                println("  problema: " + fp)
+            markTopicOutcome(store, tid, "validado", "")
+            observability.increment("publisher.content.generated", 1)
+            observability.increment("publisher.content.validated", 1)
+            println("id: " + id + "  pauta: " + tid + "  (" + draft.length + " chars)")
+            println(draft)
+            println("validacao editorial: OK deterministica")
+            println("validacao factual : OK (proxy mecanico, " + srcs.size() + " fonte(s) rastreada(s))")
+            for (var w in v.warnings()) {
+                println("warn: " + w)
             }
             for (var fw in fc.warnings()) {
-                println("  warn: " + fw)
+                println("warn factual: " + fw)
             }
             println("")
+            produced = true
+            proposals = proposals + 1
+            recent = store.recentEditorialContents(8, "")
+        }
+        if (!produced) {
             invalid = invalid + 1
-            continue
+            // Every candidate for this slot failed the factual gate. Persist the
+            // last failure as a REVIEW item so the block is visible instead of
+            // leaving the slot mysteriously empty; it is never approved.
+            if (lastFailDraft != "") {
+                store.savePublication(Publication(lastFailId, company.name(), lastFailTheme, lastFailDraft, statusReview(), now, "", "", "dryrun", lmModel(), company.digest(), "", "", "", lastFailId, 0, lastFailTid))
+                println("  (rascunho guardado em REVIEW com a ressalva; nenhuma alternativa restou)")
+            }
         }
-        store.savePublication(Publication(id, company.name(), c.theme(), draft, statusReview(), now, "", "", "dryrun", lmModel(), company.digest(), "", "", "", id, 0, tid))
-        markTopicOutcome(store, tid, "validado", "")
-        observability.increment("publisher.content.generated", 1)
-        observability.increment("publisher.content.validated", 1)
-        println("id: " + id + "  pauta: " + tid + "  (" + draft.length + " chars)")
-        println(draft)
-        println("validacao editorial: OK deterministica")
-        println("validacao factual : OK (proxy mecanico, " + srcs.size() + " fonte(s) rastreada(s))")
-        for (var w in v.warnings()) {
-            println("warn: " + w)
-        }
-        for (var fw in fc.warnings()) {
-            println("warn factual: " + fw)
-        }
-        println("")
-        proposals = proposals + 1
-        recent = store.recentEditorialContents(8, "")
     }
 
     println("OK " + proposals + " proposta(s) em REVIEW, " + skipped + " horario(s) sem material, " + invalid + " descartada(s) pela validacao.")
