@@ -1,0 +1,334 @@
+
+// Enois — the author's OWN profile as the editorial source of truth.
+//
+// The publisher used to pick a third-party item (HN/dev.to/lobsters) and write
+// about it. That model is replaced: the source is now what the AUTHOR wrote on
+// enois.ia.br, and the job is to mirror it — share the post's public link on
+// LinkedIn with a caption derived from the post's own text. Nothing is invented
+// because there is nothing to research: the post IS the material.
+//
+// API (measured 2026-10-17 against the live site; the front-end bundle declares
+// the base as https://enois.ia.br/api):
+//
+//   GET /api/users/{username}                 -> { "id": "user_...", ... }
+//   GET /api/users/{userId}/posts?limit=N     -> { "items": [ ... ], "nextCursor": "..." }
+//   GET /api/feed/posts/{postId}              -> the single post, WITH pageHtml
+//
+// Public URL of a post (what gets shared): {site}/post/{postId}
+//
+// Post shapes seen on the real profile: INSIGHT / NEWS / QUESTION / PROJECT
+// carry their text in `content`; PAGE carries it in `pageHtml` (an HTML
+// fragment), which the LIST endpoint does NOT return — a PAGE post needs the
+// detail call. That difference is why enoisPostText() takes the site and can
+// fetch the detail lazily.
+//
+// Kept self-contained (stdlib + json only, no other src file) so
+// `kof test src/Enois.kf` compiles it standalone — the root-package split
+// (BUG-6) otherwise forces self-contained modules for in-source unit tests.
+
+record EnoisCommunity(String id, String name)
+record EnoisPost(
+    String id,
+    String type,
+    String content,
+    String articleBody,
+    String pageHtml,
+    String createdAt,
+    String authorUsername,
+    String communityId,
+    EnoisCommunity community)
+record EnoisPage(List<EnoisPost> items, String nextCursor)
+record EnoisUser(String id, String username, String name)
+
+// ---- config (every URL is overridable — that is the test hook) ----
+
+String enoisSite() {
+    return config.str("enois.site", "https://enois.ia.br")
+}
+
+String enoisApiBase() {
+    return config.str("enois.api", enoisSite() + "/api")
+}
+
+String enoisUsername() {
+    return config.str("enois.username", "")
+}
+
+// The public link that gets shared. `/post/<id>` is the route the front-end
+// declares and it answers 200 on the live site (measured 2026-10-17).
+String enoisPostUrl(String postId) {
+    return enoisSite() + "/post/" + postId
+}
+
+String enoisProfileUrl() {
+    var u = enoisUsername()
+    if (u == "") {
+        return enoisSite()
+    }
+    return enoisSite() + "/perfil/" + u
+}
+
+// ---- HTTP (free function only — a spawn lambda that calls an enclosing
+// instance method fails JVM verification, BUG-13 family) ----
+
+String enoisHttpGetSafe(String url) {
+    try {
+        return http.get(url, "Accept: application/json", "User-Agent: kof-publisher")
+    } catch (Exception e) {
+        return "__KOF_ENOIS_ERR__" + e.toString()
+    }
+}
+
+String enoisGet(String url) {
+    var ms = config.int("enois.timeout", 20)
+    http.timeout(ms)
+    var h = spawn enoisHttpGetSafe(url)
+    var waited = 0
+    var limitMs = ms * 1000 + 10000
+    while (waited < limitMs && !done(h)) {
+        time.sleep(50)
+        waited = waited + 50
+    }
+    if (!done(h)) {
+        return "__KOF_ENOIS_ERR__enois: requisicao ainda em execucao apos o timeout (" + url + ")"
+    }
+    var v = poll(h)
+    var raw = v as String
+    if (raw.startsWith("__KOF_ENOIS_ERR__")) {
+        return raw
+    }
+    if (raw.trim() == "") {
+        return "__KOF_ENOIS_ERR__enois: resposta vazia (" + url + ")"
+    }
+    return raw
+}
+
+// ---- reading the profile ----
+
+String enoisResolveUserId() {
+    var cached = config.str("enois.user.id", "")
+    if (cached != "") {
+        return cached
+    }
+    var u = enoisUsername()
+    if (u == "") {
+        return ""
+    }
+    var raw = enoisGet(enoisApiBase() + "/users/" + u)
+    if (raw.startsWith("__KOF_ENOIS_ERR__")) {
+        return ""
+    }
+    try {
+        var user = json.decode<EnoisUser>(raw)
+        return user.id()
+    } catch (Exception e) {
+        return ""
+    }
+}
+
+List<EnoisPost> enoisListPosts(Int limit) {
+    var uid = enoisResolveUserId()
+    if (uid == "") {
+        return listOf<EnoisPost>()
+    }
+    var raw = enoisGet(enoisApiBase() + "/users/" + uid + "/posts?limit=" + limit)
+    if (raw.startsWith("__KOF_ENOIS_ERR__")) {
+        return listOf<EnoisPost>()
+    }
+    try {
+        var page = json.decode<EnoisPage>(raw)
+        return page.items()
+    } catch (Exception e) {
+        return listOf<EnoisPost>()
+    }
+}
+
+String enoisFetchPageHtml(String postId) {
+    var raw = enoisGet(enoisApiBase() + "/feed/posts/" + postId)
+    if (raw.startsWith("__KOF_ENOIS_ERR__")) {
+        return ""
+    }
+    try {
+        var p = json.decode<EnoisPost>(raw)
+        var ph = p.pageHtml()
+        if (ph == null) {
+            return ""
+        }
+        return ph
+    } catch (Exception e) {
+        return ""
+    }
+}
+
+// ---- text extraction ----
+
+// A PAGE post's pageHtml carries its OWN <style> and <script> blocks. Stripping
+// tags alone leaves the CSS TEXT behind, and that text then became the link
+// card's title (measured 2026-10-17: the card title was ".enois-welcome {
+// font-family: Arial, Helvetica, sans-serif; ..."). Whole blocks are dropped
+// BEFORE the tag strip.
+String enoisDropTagBlocks(String html, String tag) {
+    var open = "<" + tag
+    var close = "</" + tag + ">"
+    var out = html
+    var guard = 0
+    while (guard < 50) {
+        var low = out.toLowerCase()
+        var a = low.indexOf(open)
+        if (a < 0) {
+            return out
+        }
+        var b = low.indexOf(close, a)
+        if (b < 0) {
+            return out
+        }
+        out = out.substring(0, a) + " " + out.substring(b + close.length, out.length)
+        guard = guard + 1
+    }
+    return out
+}
+
+String enoisStripHtml(String html) {
+    // The LIST endpoint omits `pageHtml`/`articleBody` (only the detail carries
+    // them), so the record accessor hands back a JVM null. Guarded here because
+    // every text path funnels through this function.
+    if (html == null) {
+        return ""
+    }
+    var clean = enoisDropTagBlocks(html, "style")
+    clean = enoisDropTagBlocks(clean, "script")
+    var out = ""
+    var i = 0
+    var inTag = false
+    while (i < clean.length) {
+        var c = clean.charAt(i)
+        if (c == 60) {
+            inTag = true
+        } else if (c == 62) {
+            inTag = false
+            out = out + " "
+        } else if (!inTag) {
+            out = out + clean.substring(i, i + 1)
+        }
+        i = i + 1
+    }
+    return enoisDecodeEntities(out)
+}
+
+String enoisDecodeEntities(String s) {
+    var out = s
+    out = enoisReplaceAll(out, "&nbsp;", " ")
+    out = enoisReplaceAll(out, "&amp;", "&")
+    out = enoisReplaceAll(out, "&lt;", "<")
+    out = enoisReplaceAll(out, "&gt;", ">")
+    out = enoisReplaceAll(out, "&quot;", "\"")
+    out = enoisReplaceAll(out, "&#39;", "'")
+    return out
+}
+
+// Replace-all without regex (String.split takes a REGEX in Kof, so a literal
+// replacement built on split would blow up on '.', '&', etc.).
+String enoisReplaceAll(String s, String needle, String repl) {
+    if (needle == "") {
+        return s
+    }
+    var out = ""
+    var i = 0
+    while (i < s.length) {
+        if (i + needle.length <= s.length && s.substring(i, i + needle.length) == needle) {
+            out = out + repl
+            i = i + needle.length
+        } else {
+            out = out + s.substring(i, i + 1)
+            i = i + 1
+        }
+    }
+    return out
+}
+
+// Collapse whitespace but keep sentence structure: the caption is generated
+// from this, so runs of spaces/newlines become a single space.
+String enoisCleanText(String s) {
+    if (s == null) {
+        return ""
+    }
+    var out = ""
+    var lastSpace = false
+    var i = 0
+    while (i < s.length) {
+        var c = s.charAt(i)
+        if (c == 32 || c == 10 || c == 13 || c == 9) {
+            if (!lastSpace) {
+                out = out + " "
+                lastSpace = true
+            }
+        } else {
+            out = out + s.substring(i, i + 1)
+            lastSpace = false
+        }
+        i = i + 1
+    }
+    return out.trim()
+}
+
+// The post's own text. `content` covers every type except PAGE; PAGE carries an
+// HTML fragment that only the DETAIL endpoint returns, so when content and
+// articleBody are both empty and the post is a PAGE, fetch the detail.
+//
+// Returns "" when the post carries no readable text at all — the caller must
+// treat that as "nothing to write about", never invent a caption.
+String enoisPostText(EnoisPost p) {
+    var c = enoisCleanText(p.content())
+    if (c != "") {
+        return c
+    }
+    var ab = enoisCleanText(enoisStripHtml(p.articleBody()))
+    if (ab != "") {
+        return ab
+    }
+    if (p.type() != null && p.type() == "PAGE") {
+        var html = enoisFetchPageHtml(p.id())
+        if (html != null && html != "") {
+            return enoisCleanText(enoisStripHtml(html))
+        }
+    }
+    return ""
+}
+
+// ---- tests (pure functions only — no network) ----
+
+test "enois: the shared url is the public post route" {
+    assert(enoisPostUrl("post_abc") == enoisSite() + "/post/post_abc", enoisPostUrl("post_abc"))
+}
+
+test "enois: html is stripped to text" {
+    assert(enoisCleanText(enoisStripHtml("<p>Ola <b>mundo</b></p>")) == "Ola mundo")
+}
+
+test "enois: entities are decoded" {
+    assert(enoisCleanText(enoisStripHtml("<p>a &amp; b &lt;c&gt; &quot;d&quot;</p>")) == "a & b <c> \"d\"", enoisCleanText(enoisStripHtml("<p>a &amp; b &lt;c&gt;</p>")))
+}
+
+test "enois: whitespace collapses but words survive" {
+    assert(enoisCleanText("  um   texto\n\ncom   linhas  ") == "um texto com linhas")
+    assert(enoisCleanText("") == "")
+}
+
+test "enois: replace-all does not treat the needle as a regex" {
+    assert(enoisReplaceAll("a.b.c", ".", "-") == "a-b-c", enoisReplaceAll("a.b.c", ".", "-"))
+    assert(enoisReplaceAll("xx", "", "-") == "xx")
+}
+
+test "enois: a PAGE post's own css never leaks into the text" {
+    var h = "<style>.enois-welcome{font-family:Arial;color:#29213b}</style><div><p>Bem-vindo ao enois.</p></div>"
+    var t = enoisCleanText(enoisStripHtml(h))
+    assert(t.indexOf("font-family") < 0, "css vazou para o texto: " + t)
+    assert(t.indexOf("Bem-vindo") >= 0, "o texto do post sumiu: " + t)
+}
+
+test "enois: script blocks are dropped too" {
+    var h = "<script>var x = 1;</script><p>conteudo real</p>"
+    var t = enoisCleanText(enoisStripHtml(h))
+    assert(t.indexOf("var x") < 0, t)
+    assert(t.indexOf("conteudo real") >= 0, t)
+}

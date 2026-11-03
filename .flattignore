@@ -1,0 +1,41 @@
+build/
+*.db
+.kof/
+*.stop
+out/
+*.log
+*.db
+var/
+/auth.md
+
+# ===== ^ above synced from .gitignore ("Sync from .gitignore" only rewrites the section above) =====
+.git/
+.hg/
+.svn/
+node_modules/
+bower_components/
+jspm_packages/
+__pycache__/
+site-packages/
+venv/
+coverage/
+htmlcov/
+lcov-report/
+cmakefiles/
+cmake-build-*/
+bazel-*/
+pods/
+deriveddata/
+storybook-static/
+playwright-report/
+test-results/
+allure-results/
+allure-report/
+cdk.out/
+*.egg-info/
+*.dist-info/
+eggs/
+pip-wheel-metadata/
+wheels/
+# ----- ^ above are Flatt default exclusion rules (write custom rules below this line; sync/restore never touches them) -----
+# Write custom rules below (this hint line may be deleted)

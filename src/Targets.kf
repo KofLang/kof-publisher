@@ -23,6 +23,10 @@ record PublishOutcome(String externalId, String raw)
 interface PublicationTarget {
     String name()
     PublishOutcome publish(String text)
+    // Share a LINK with a caption (the enois mirror). Targets that cannot carry
+    // a link fall back to publishing the caption plus the url as text — never a
+    // silent "published" without the link.
+    PublishOutcome publishLink(String text, String url, String title, String description)
 }
 
 // Named-secret resolution with a REAL fallback: kof.secrets is documented
@@ -59,6 +63,10 @@ class ClipboardTarget implements PublicationTarget {
         // no xclip on the box: the text is staged in the file anyway —
         // honest degradation, never a silent fake "published"
         return PublishOutcome("clipboard", "arquivo /tmp/kof-publish-clipboard.txt (xclip indisponivel: " + strings.truncate(h.stderr, 120) + ")")
+    }
+
+    PublishOutcome publishLink(String text, String url, String title, String description) {
+        return publish(text + "\n\n" + url)
     }
 }
 
@@ -102,6 +110,21 @@ class DryRunTarget implements PublicationTarget {
         d.createDirectories()
         var id = "dryrun-" + uuid.v4()
         var ok = File(dir + "/" + id + ".md").writeText(text + "\n")
+        if (!ok) {
+            throw "dryrun: falhou a escrita em " + dir
+        }
+        return PublishOutcome(id, "")
+    }
+
+    PublishOutcome publishLink(String text, String url, String title, String description) {
+        var d = Directory(dir)
+        d.createDirectories()
+        var id = "dryrun-" + uuid.v4()
+        var body = text + "\n\n" + url + "\n"
+        if (title != "") {
+            body = body + "title: " + title + "\n"
+        }
+        var ok = File(dir + "/" + id + ".md").writeText(body)
         if (!ok) {
             throw "dryrun: falhou a escrita em " + dir
         }
@@ -155,7 +178,36 @@ class LinkedInTarget implements PublicationTarget {
             + "\",\"visibility\":\"PUBLIC\",\"distribution\":{\"feedDistribution\":\"MAIN_FEED\",\"targetEntities\":[],\"thirdPartyDistributionChannels\":[]},\"lifecycleState\":\"PUBLISHED\",\"isReshareDisabledByAuthor\":false}"
     }
 
+    // `content.article` is what makes LinkedIn render a link card instead of a
+    // bare URL in the text. title/description are optional: when the post has
+    // no usable title we send only the source, and LinkedIn fills the card from
+    // the page's own metadata.
+    String linkBodyFor(String text, String url, String title, String description) {
+        var article = "{\"source\":\"" + strings.escapeJson(url) + "\""
+        if (title != "") {
+            article = article + ",\"title\":\"" + strings.escapeJson(strings.truncate(title, 200)) + "\""
+        }
+        if (description != "") {
+            article = article + ",\"description\":\"" + strings.escapeJson(strings.truncate(description, 300)) + "\""
+        }
+        article = article + "}"
+        return "{\"author\":\"" + authorUrn + "\",\"commentary\":\"" + strings.escapeJson(text)
+            + "\",\"visibility\":\"PUBLIC\",\"distribution\":{\"feedDistribution\":\"MAIN_FEED\",\"targetEntities\":[],\"thirdPartyDistributionChannels\":[]},\"lifecycleState\":\"PUBLISHED\",\"isReshareDisabledByAuthor\":false,\"content\":{\"article\":" + article + "}}"
+    }
+
     PublishOutcome publish(String text) {
+        return sendBody(bodyFor(text))
+    }
+
+    // Share the LINK of one of the author's OWN enois posts, with a caption
+    // written from that post's text. LinkedIn builds the preview card from
+    // `content.article`; the caption travels in `commentary`, exactly like a
+    // normal share.
+    PublishOutcome publishLink(String text, String url, String title, String description) {
+        return sendBody(linkBodyFor(text, url, title, description))
+    }
+
+    PublishOutcome sendBody(String body) {
         checkAuthorPolicy()
         var token = pSecret("linkedin.access.token", "KOF_LINKEDIN_ACCESS_TOKEN")
         if (token == "") {
@@ -171,7 +223,6 @@ class LinkedInTarget implements PublicationTarget {
         // free of enclosing-instance method calls — the other spawn sites in
         // this codebase already call only free functions, which is why they are
         // unaffected.
-        var body = bodyFor(text)
         var h = spawn http.post(apiUrl + "/rest/posts", body,
             "Content-Type: application/json",
             "Authorization: Bearer " + token,

@@ -166,6 +166,7 @@ guide:
   - nao faca todo post terminar com conclusao redonda, nem conclusao que so reformula o titulo
   - nao transforme toda publicacao em provocacao nem em licao de vida
   - varIE vocabulario e estrutura entre os horarios, a voz consistente convive com diversidade natural
+  - TODO post que fale do Kof (a linguagem, Kof4j, KofOS, o ecossistema) termina com a linha KOFFIE VOOR IEDEREEN e contem o link https://koflang.github.io; o grito de guerra e sempre a ULTIMA linha
   - respeite o limite de tamanho do perfil
   - antes de entregar revise mentalmente, ponto demais, quebra demais, frase curta demais, tom corporativo, sem travessao
 
@@ -178,6 +179,15 @@ research:
   - devto
   - lobsters
 research_max_age_hours: 168
+subjects:
+  - ia: IA, llm, modelo, modelos, generativa, generativo, prompt, tokens, alucinacao
+  - arquitetura: arquitetura, microsservico, microsservicos, monolito, distribuido, distribuida
+  - legado: legado, legada, cobol, mainframe, z/os, gnucobol
+  - testes: teste, testes, cobertura, tdd
+  - carreira: carreira, junior, senioridade, time, lideranca, contratacao
+  - open source: open source, licenca, mantenedor, fork, repositorio
+  - performance: performance, latencia, cache, throughput, benchmark
+  - processos: processo, reuniao, cerimonia, burocracia, produtividade
 retention_records: 10000
 retention_max_gb: 20
 diversity:
@@ -204,11 +214,13 @@ account: melmonfre
 enabled: true
 orgs:
   - KofLang
+own_forks:
+  - vibe-os
 
 # publishing
 
 timezone: America/Sao_Paulo
-mode: assisted
+mode: autonomous
 target: linkedin
 
 # category morning
@@ -216,7 +228,7 @@ target: linkedin
 clock: 06:00
 label: trabalho real e projetos
 function: projetos
-angle: o que mudou de fato no projeto, sustentado na analise real do repositorio, separando o que esta documentado do que foi verificado rodando. O texto e sobre o PROJETO e o que mudou nele; nao vire isso numa defesa de tecnologia antiga contra moderna — essa discussao pertence ao horario de contraponto
+angle: o que mudou de fato no projeto, sustentado na analise real do repositorio, separando o que esta documentado do que foi verificado rodando. O texto e sobre o PROJETO e o que mudou nele; nao vire isso numa defesa de tecnologia antiga contra moderna — essa discussao pertence ao horario de contraponto. Kof e o projeto principal dela: noticia, release, curiosidade ou marco do Kof (a linguagem, Kof4j, KofOS, o ecossistema) tambem serve aqui, nao so mudanca de commit
 
 # category noon
 
@@ -239,30 +251,46 @@ label: observacao e bastidores
 function: observacao
 angle: observacao, provocacao ou humor sobre o trabalho de engenharia, sem licao de moral e sem inventar experiencia
 
+# enois (espelho DESLIGADO)
+
+# O espelho do perfil do enois continua no codigo e testado, mas esta desligado:
+# o modo ativo e o de publicacoes programadas por horario (blocos abaixo).
+# Para religar, exporte KOF_ENOIS_POLL_MIN=10 e desligue as agendas.
+#
+# ATENCAO: as chaves abaixo NAO sao lidas pelo parser deste arquivo (ele so
+# entende as secoes declaradas no Context.kf). Elas ficam aqui como registro do
+# que esta configurado; o valor REAL vem do ambiente, exportado por
+# tools/kof-publisher-service.sh:
+#
+#   KOF_ENOIS_USERNAME=aminadojava
+#   KOF_ENOIS_POLL_MIN=0         (0 desliga o espelho; este e o valor atual)
+#   KOF_ENOIS_MIN_CHARS=40       (post curto demais nao tem o que legendar)
+#   KOF_ENOIS_MAX_PER_POLL=2     (no maximo 2 compartilhamentos por ciclo)
+
 # schedule morning
 
 every: 1
 at: 06:00
-mode: assisted
+mode: autonomous
 target: linkedin
 
 # schedule noon
 
 every: 1
 at: 12:00
-mode: assisted
+mode: autonomous
 target: linkedin
 
 # schedule afternoon
 
 every: 1
 at: 15:00
-mode: assisted
+mode: autonomous
 target: linkedin
 
 # schedule evening
 
 every: 1
 at: 18:00
-mode: assisted
+mode: autonomous
 target: linkedin

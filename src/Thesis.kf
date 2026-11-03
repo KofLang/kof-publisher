@@ -1,0 +1,500 @@
+
+// Thesis — SEMANTIC-LEANING repetition detection.
+//
+// The old memory (src/Memory.kf) is purely lexical: n-gram overlap over the
+// whole text. Measured on 2026-10-11 it let two posts through that argued the
+// SAME thesis with different words ("tecnologia antiga nao e debito tecnico" at
+// 15:00 and the same idea restated at 18:00 shared 0% of their 4-grams). The
+// spec is explicit that lexical comparison is not enough and that a comparison
+// proportional to the project is wanted, WITHOUT adding unnecessary
+// infrastructure.
+//
+// So this module compares the THESIS, not the prose, in three layers:
+//
+//   1. A curated fold maps domain synonyms onto one token, so "microsservico"
+//      and "distribuicao", "legado" and "antigo", "hype" and "moda" stop
+//      looking like different subjects.
+//   2. A signature is the set of distinctive content words (stopwords and
+//      generic filler removed), which is stable under rephrasing that keeps
+//      the vocabulary and shifts the syntax.
+//   3. POLARITY: the same words with opposite stance ("X funciona" vs "X nao
+//      funciona") are different theses, so negation/contrast markers are
+//      counted and a polarity clash BLOCKS the "same thesis" verdict.
+//
+// WHAT THIS STILL CANNOT DO, stated plainly: two texts that argue the same
+// idea using genuinely different vocabulary ("complexidade acidental" vs
+// "overengineering") remain invisible to any deterministic method here. That
+// gap is closed only by the OPTIONAL model adjudication below, which is off by
+// default and, when on, is asked ONE short yes/no question about two theses —
+// a bounded, cheap call, not a second full generation.
+
+// Lowercase + strip Latin-1 accents, mapping every non-word char to a space.
+// Inlined (not Memory.foldForMemory) so `kof test src/Thesis.kf` compiles and
+// runs standalone — the root-package split forces self-contained modules.
+String thesisFoldText(String s) {
+    var lower = s.toLowerCase()
+    var out = ""
+    var i = 0
+    while (i < lower.length) {
+        var c = lower.charAt(i)
+        if ((c >= 97 && c <= 122) || (c >= 48 && c <= 57)) {
+            out = out + lower.substring(i, i + 1)
+        } else if (c == 224 || c == 225 || c == 226 || c == 227 || c == 229) {
+            out = out + "a"
+        } else if (c == 231) {
+            out = out + "c"
+        } else if (c == 232 || c == 233 || c == 234) {
+            out = out + "e"
+        } else if (c == 237) {
+            out = out + "i"
+        } else if (c == 242 || c == 243) {
+            out = out + "o"
+        } else if (c == 250) {
+            out = out + "u"
+        } else {
+            out = out + " "
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// ---- stopwords and filler ----
+//
+// Not just connectives: also the words that appear in EVERY post of this
+// author ("engenharia", "tecnico", "software") carry no thesis signal, so
+// keeping them would make every pair of texts look similar.
+
+List<String> thesisStopwords() {
+    var w = listOf<String>()
+    w.add("a")
+    w.add("o")
+    w.add("as")
+    w.add("os")
+    w.add("de")
+    w.add("da")
+    w.add("do")
+    w.add("das")
+    w.add("dos")
+    w.add("e")
+    w.add("ou")
+    w.add("que")
+    w.add("com")
+    w.add("sem")
+    w.add("por")
+    w.add("para")
+    w.add("pra")
+    w.add("no")
+    w.add("na")
+    w.add("nos")
+    w.add("nas")
+    w.add("um")
+    w.add("uma")
+    w.add("uns")
+    w.add("umas")
+    w.add("ao")
+    w.add("aos")
+    w.add("as")
+    w.add("se")
+    w.add("ja")
+    w.add("nao")
+    w.add("nem")
+    w.add("mais")
+    w.add("menos")
+    w.add("muito")
+    w.add("pouco")
+    w.add("todo")
+    w.add("toda")
+    w.add("todos")
+    w.add("todas")
+    w.add("esse")
+    w.add("essa")
+    w.add("isso")
+    w.add("este")
+    w.add("esta")
+    w.add("isto")
+    w.add("aquele")
+    w.add("aquela")
+    w.add("aquilo")
+    w.add("ele")
+    w.add("ela")
+    w.add("eles")
+    w.add("elas")
+    w.add("eu")
+    w.add("voce")
+    w.add("nos")
+    w.add("me")
+    w.add("te")
+    w.add("lhe")
+    w.add("meu")
+    w.add("minha")
+    w.add("seu")
+    w.add("sua")
+    w.add("ser")
+    w.add("sao")
+    w.add("sou")
+    w.add("esta")
+    w.add("estao")
+    w.add("foi")
+    w.add("era")
+    w.add("tem")
+    w.add("tem")
+    w.add("ha")
+    w.add("fazer")
+    w.add("feito")
+    w.add("faz")
+    w.add("vai")
+    w.add("vou")
+    w.add("ter")
+    w.add("como")
+    w.add("quando")
+    w.add("onde")
+    w.add("porque")
+    w.add("pois")
+    w.add("mas")
+    w.add("porem")
+    w.add("contudo")
+    w.add("entretanto")
+    w.add("todavia")
+    w.add("embora")
+    w.add("ainda")
+    w.add("mesmo")
+    w.add("so")
+    w.add("apenas")
+    w.add("tambem")
+    w.add("aqui")
+    w.add("ali")
+    w.add("la")
+    w.add("agora")
+    w.add("depois")
+    w.add("antes")
+    w.add("entao")
+    w.add("assim")
+    w.add("sobre")
+    w.add("entre")
+    w.add("ate")
+    w.add("desde")
+    w.add("cada")
+    w.add("qual")
+    w.add("quais")
+    w.add("qualquer")
+    w.add("outro")
+    w.add("outra")
+    w.add("outros")
+    w.add("outras")
+    w.add("the")
+    w.add("and")
+    w.add("of")
+    w.add("to")
+    w.add("in")
+    w.add("is")
+    w.add("it")
+    // domain filler: present in almost every post this author writes
+    w.add("engenharia")
+    w.add("engenheiro")
+    w.add("engenheira")
+    w.add("tecnico")
+    w.add("tecnica")
+    w.add("tecnologia")
+    w.add("software")
+    w.add("codigo")
+    w.add("sistema")
+    w.add("sistemas")
+    w.add("time")
+    w.add("times")
+    w.add("gente")
+    w.add("coisa")
+    w.add("coisas")
+    w.add("forma")
+    w.add("jeito")
+    w.add("parte")
+    w.add("caso")
+    w.add("ponto")
+    w.add("vez")
+    w.add("vezes")
+    w.add("tipo")
+    w.add("sempre")
+    w.add("nunca")
+    // Aggregator METADATA, not thesis. A Hacker News item's "argument" is the
+    // score line ("150 pontos na front page"), so these words are shared by
+    // EVERY item from that source and inflate the similarity of two unrelated
+    // stories. Measured on 2026-10-11: with them counted, an "against
+    // microservices" story and an "in favour when justified" story scored 58%
+    // and were wrongly collapsed into the same thesis; without them, 36%.
+    w.add("pontos")
+    w.add("comentarios")
+    w.add("front")
+    w.add("page")
+    return w
+}
+
+Bool thesisIsStop(String w) {
+    for (var s in thesisStopwords()) {
+        if (s == w) {
+            return true
+        }
+    }
+    return false
+}
+
+// ---- synonym folding ----
+//
+// Maps the vocabulary variants this author actually uses onto one token, so a
+// rephrasing that swaps the noun does not look like a new subject. Kept small
+// and hand-checked on purpose: an automatic stemmer in Kof would be a new
+// dependency for a marginal gain, and a WRONG fold merges two real theses.
+String thesisFold(String w) {
+    if (w == "microsservico" || w == "microsservicos" || w == "microservico" || w == "microservicos") {
+        return "microsservico"
+    }
+    if (w == "distribuido" || w == "distribuida" || w == "distribuicao" || w == "distribuidas" || w == "distribuidos") {
+        return "distribuicao"
+    }
+    if (w == "legado" || w == "legada" || w == "legados" || w == "antigo" || w == "antiga" || w == "antigos" || w == "antigas") {
+        return "legado"
+    }
+    if (w == "hype" || w == "moda" || w == "modismo" || w == "novidade" || w == "novidades") {
+        return "hype"
+    }
+    if (w == "complexidade" || w == "complicacao" || w == "overengineering" || w == "acidental") {
+        return "complexidade"
+    }
+    if (w == "teste" || w == "testes" || w == "testar" || w == "testado" || w == "testada") {
+        return "teste"
+    }
+    if (w == "documentacao" || w == "documentado" || w == "documentada" || w == "documentar" || w == "readme") {
+        return "documentacao"
+    }
+    if (w == "ia" || w == "llm" || w == "llms" || w == "modelo" || w == "modelos" || w == "generativa" || w == "generativo") {
+        return "ia"
+    }
+    if (w == "produtividade" || w == "produtivo" || w == "produtiva" || w == "velocidade") {
+        return "produtividade"
+    }
+    if (w == "arquitetura" || w == "arquitetural" || w == "arquiteturas") {
+        return "arquitetura"
+    }
+    if (w == "abstracao" || w == "abstrato" || w == "abstrata" || w == "abstrair") {
+        return "abstracao"
+    }
+    if (w == "monolito" || w == "monolitico" || w == "monolitica") {
+        return "monolito"
+    }
+    if (w == "latencia" || w == "lento" || w == "lenta" || w == "desempenho" || w == "performance") {
+        return "latencia"
+    }
+    if (w == "manutencao" || w == "manter" || w == "mantido" || w == "mantida") {
+        return "manutencao"
+    }
+    if (w == "risco" || w == "riscos" || w == "perigo" || w == "perigoso") {
+        return "risco"
+    }
+    if (w == "custo" || w == "custos" || w == "caro" || w == "cara") {
+        return "custo"
+    }
+    if (w == "evidencia" || w == "evidencias" || w == "prova" || w == "provas" || w == "comprovacao") {
+        return "evidencia"
+    }
+    if (w == "raciocinio" || w == "raciocinar" || w == "pensar" || w == "pensamento" || w == "criterio") {
+        return "raciocinio"
+    }
+    if (w == "responsabilidade" || w == "responsavel" || w == "autoria") {
+        return "responsabilidade"
+    }
+    return w
+}
+
+// Fold a single word for comparison: ascii, lowercased, plural trimmed.
+String thesisWord(String raw) {
+    var w = thesisFoldText(raw).trim()
+    if (w.length > 3 && w.endsWith("s")) {
+        w = w.substring(0, w.length - 1)
+    }
+    return thesisFold(w)
+}
+
+// Content words of a text: folded, stopwords removed, duplicates collapsed.
+List<String> thesisContentWords(String text) {
+    var out = listOf<String>()
+    for (var raw in thesisFoldText(text).split(" ")) {
+        if (raw == "") {
+            continue
+        }
+        var w = thesisWord(raw)
+        if (w.length < 4 || thesisIsStop(w)) {
+            continue
+        }
+        var seen = false
+        for (var o in out) {
+            if (o == w) {
+                seen = true
+            }
+        }
+        if (!seen) {
+            out.add(w)
+        }
+    }
+    return out
+}
+
+// ---- signature ----
+//
+// A thesis is represented by its distinctive content words, SORTED so the
+// representation is order-independent (a rephrasing reorders the sentence).
+// Capped so a long rambling text cannot dilute the signal with tail words.
+String thesisSignature(String text) {
+    var ws = thesisContentWords(text)
+    // insertion sort, ascending — small list, no sort primitive
+    var i = 1
+    while (i < ws.size()) {
+        var cur = ws.get(i)
+        var j = i - 1
+        while (j >= 0 && ws.get(j).compareTo(cur) > 0) {
+            ws.set(j + 1, ws.get(j))
+            j = j - 1
+        }
+        ws.set(j + 1, cur)
+        i = i + 1
+    }
+    var out = ""
+    var k = 0
+    while (k < ws.size() && k < 40) {
+        if (out != "") {
+            out = out + " "
+        }
+        out = out + ws.get(k)
+        k = k + 1
+    }
+    return out
+}
+
+// Dice coefficient over the two signature sets, as a percentage. Symmetric on
+// purpose: unlike the old containment measure, two posts that each carry a lot
+// of extra material must not be excused just because one is longer.
+Int thesisOverlapPercent(String a, String b) {
+    var wa = thesisContentWords(a)
+    var wb = thesisContentWords(b)
+    if (wa.size() == 0 || wb.size() == 0) {
+        return 0
+    }
+    var shared = 0
+    for (var x in wa) {
+        for (var y in wb) {
+            if (x == y) {
+                shared = shared + 1
+            }
+        }
+    }
+    return (shared * 200) / (wa.size() + wb.size())
+}
+
+// ---- polarity ----
+//
+// The same subject with the opposite stance is a different thesis. Counts
+// NEGATORS only (nao, nunca, sem, ...) — NOT evaluative nouns like "problema"
+// or "falha", which appear on both sides of an argument as ordinary words and
+// would make two opposing texts look equally negative. A large imbalance in
+// negator density means the two texts do not agree and must not be collapsed
+// into "the same thesis".
+
+List<String> thesisNegationMarkers() {
+    var w = listOf<String>()
+    w.add(" nao ")
+    w.add(" nunca ")
+    w.add(" jamais ")
+    w.add(" nem ")
+    w.add(" sem ")
+    w.add(" tampouco ")
+    w.add(" discordo ")
+    w.add(" recuso ")
+    return w
+}
+
+Int thesisNegationCount(String text) {
+    var low = " " + thesisFoldText(text).trim() + " "
+    var n = 0
+    for (var m in thesisNegationMarkers()) {
+        var i = 0
+        while (i < low.length) {
+            var hit = low.indexOf(m, i)
+            if (hit < 0) {
+                break
+            }
+            n = n + 1
+            i = hit + 1
+        }
+    }
+    return n
+}
+
+// Do two texts argue the same thing? Takes the RAW texts, not signatures: the
+// signature strips stopwords, and the negators ("nao", "sem", "nunca") ARE
+// stopwords, so computing polarity from a signature would always read 0 and the
+// polarity guard would never fire. Measured on 2026-10-11, when a
+// "microsservicos resolvem..." story was wrongly collapsed with a
+// "microsservicos sem necessidade adicionam..." story.
+//
+//   same=true  -> treat as repetition, refuse the pauta
+//   same=false -> different enough
+Bool thesisLooksRepeated(String a, String b) {
+    var ov = thesisOverlapPercent(a, b)
+    if (ov >= 45) {
+        return true
+    }
+    if (ov < 25) {
+        return false
+    }
+    // The middle band: similar vocabulary but possibly opposite stance. If one
+    // text denies and the other affirms in comparable volume, they are two
+    // different arguments about one subject, which the spec explicitly allows
+    // ("assunto diferente" vs "argumento diferente").
+    var na = thesisNegationCount(a)
+    var nb = thesisNegationCount(b)
+    var lo = math.min(na, nb)
+    var hi = math.max(na, nb)
+    if (hi > 0 && (lo * 100) / hi < 50) {
+        return false
+    }
+    return true
+}
+
+// ---- unit tests (run by `kof test src/Thesis.kf`) ----
+
+test "signature ignores word order and filler" {
+    var a = thesisSignature("a tecnologia antiga nao e debito tecnico por definicao")
+    var b = thesisSignature("por definicao, tecnologia antiga nao e debito tecnico")
+    assert(a == b, a + " != " + b)
+}
+
+test "synonyms fold onto one token" {
+    // Nouns only: the plural trim normalises "microsservicos" -> "microsservico",
+    // and the synonym table maps the spelling variants onto one token. Verb
+    // conjugation is NOT normalised ("trazem" != "traz") — that is the known
+    // limit, stated in the module note, and the test does not pretend it away.
+    assert(thesisSignature("microsservicos latencia custo") == thesisSignature("microservico latencia custo"))
+    assert(thesisSignature("codigo legado risco") == thesisSignature("codigo antigo risco"))
+}
+
+test "rephrasing the same thesis scores high, a different thesis does not" {
+    var a = "quebrar um monolito em microsservicos so porque e moderno adiciona latencia e custo de manutencao sem resolver gargalo real"
+    var b = "adotar distribuicao sem necessidade traz latencia, custo e risco de manutencao no lugar de um monolito que funcionava"
+    var c = "documentacao util economiza tempo de quem mantem o sistema anos depois"
+    assert(thesisOverlapPercent(a, b) >= 25, "" + thesisOverlapPercent(a, b))
+    assert(thesisOverlapPercent(a, c) < 15, "" + thesisOverlapPercent(a, c))
+    assert(thesisLooksRepeated(a, b))
+    assert(!thesisLooksRepeated(a, c))
+}
+
+test "opposite stance on the same subject is not the same thesis" {
+    var pro = "microsservicos resolvem o problema de escala e isolamento de times"
+    var con = "microsservicos nao resolvem nada disso, so adicionam latencia e complexidade"
+    assert(thesisOverlapPercent(pro, con) >= 25, "" + thesisOverlapPercent(pro, con))
+    assert(!thesisLooksRepeated(pro, con))
+}
+
+test "empty text has no thesis" {
+    assert(thesisSignature("") == "")
+    assert(thesisOverlapPercent("", "qualquer coisa") == 0)
+    assert(!thesisLooksRepeated("", ""))
+}
+

@@ -35,12 +35,136 @@ class Scheduler {
     Company company
     Int maxAttempts
     Int attemptDelayMs
+    // Same-day retry of a SLOT that did not manage to post. A missed post is
+    // not the same as a publish retry (maxAttempts): here the whole occurrence
+    // is re-run later — fresh research, fresh selection — because the cause may
+    // be "no candidate right now" or a draft the factual gate refused, and the
+    // material changes over the day. Bounded by `retryMax` attempts and by the
+    // next slot, so a slot never overlaps the following one and the loop cannot
+    // spin forever. Never fabricates: a retry that finds nothing honest still
+    // skips.
+    Int retryMax
+    Int retryDelayMin
+    // PREPARE-AHEAD: quanto antes do horario o texto e GERADO. A publicacao
+    // continua acontecendo na hora exata — o que muda e quando o rascunho e
+    // produzido. Sem isto, gerar no proprio horario significa que qualquer
+    // atraso de rede ou rejeicao do gate faz o post perder o horario; gerando
+    // antes, o texto ja esta validado e esperando quando o relogio chega.
+    Int prepLeadMin
+    // MIRROR (enois): instead of waiting for a clock slot, the daemon looks at
+    // the author's enois profile every `publisher.enois.poll.min` minutes and
+    // shares whatever is new. 0 disables the poll entirely, which is the
+    // default: the active mode is the clock schedule (the mirror stays in the
+    // code, tested, ready to be switched back on from the environment).
+    Int enoisPollMin
+    Long lastEnoisPoll
 
     constructor(Store store, Company company) {
         this.store = store
         this.company = company
         maxAttempts = config.int("publisher.attempts", 3)
         attemptDelayMs = config.int("publisher.attempt.delay.ms", 2000)
+        retryMax = config.int("publisher.retry.max", 3)
+        retryDelayMin = config.int("publisher.retry.delay.min", 20)
+        prepLeadMin = config.int("publisher.prep.lead.min", 10)
+        enoisPollMin = config.int("publisher.enois.poll.min", 0)
+        lastEnoisPoll = 0L
+    }
+
+    // One enois cycle, logged honestly: how many posts were read, how many were
+    // new, what was shared. Runs at startup too (lastEnoisPoll starts at 0), so
+    // a daemon that was down still catches up on the first loop.
+    Int pollEnoisOnce() {
+        lastEnoisPoll = time.now()
+        var rep = mirrorPoll(store, company, false)
+        if (rep.baseline()) {
+            log.info("enois: linha de base — " + rep.fresh() + " post(s) existente(s) marcado(s) como visto(s), nada publicado")
+            return 0
+        }
+        log.info("enois: " + rep.listed() + " post(s) lido(s), " + rep.fresh() + " novo(s), " + rep.shared() + " compartilhado(s), " + rep.skipped() + " ignorado(s), " + rep.failed() + " falha(s)")
+        for (var l in rep.lines()) {
+            log.info("enois: " + l)
+        }
+        return 0
+    }
+
+    // Is the pending occurrence the slot's CLOCK occurrence (as opposed to a
+    // same-day retry)? Only the clock occurrence is pulled forward by the prep
+    // lead; a retry runs at the instant it was scheduled.
+    Bool isClockRun(Schedule s) {
+        var nx = s.next_execution()
+        var clk = s.clock()
+        if (nx == "" || clk == "" || nx.length < 16) {
+            return false
+        }
+        return nx.substring(11, 16) == clk
+    }
+
+    Long prepLeadMs() {
+        return (prepLeadMin as Long) * 60000L
+    }
+
+    // Publica as publicacoes AGENDADAS cujo horario chegou. Roda em todo ciclo
+    // do daemon, independente do agendamento: e o que faz o post sair na hora
+    // exata mesmo tendo sido gerado dez minutos antes.
+    Int publishDueScheduled() {
+        for (var p in store.publicationsByStatus(statusScheduled())) {
+            if (p.scheduled_at() == "") {
+                continue
+            }
+            if (millisUntil(p.scheduled_at()) > 0) {
+                continue
+            }
+            var rep = publishWithRetry(p.occurrence_key(), p.recurrence_id(), p.scheduled_at(), p.id(), p.topic(), p.content(), nowStamp(), p.target())
+            if (rep.result() == "published" && company.sourceRepo() != "") {
+                advanceLabMarker(p.scheduled_at())
+            }
+            log.info("agendado " + p.id() + " (" + p.scheduled_at() + ") -> " + rep.result())
+        }
+        return 0
+    }
+
+    // When a slot fails to post, when should it try again? `now + retryDelayMin`
+    // — but only if that still fits BEFORE the next slot; otherwise the retry is
+    // dropped and the normal schedule takes over (the next slot will run anyway).
+    // Returns "" when no retry fits.
+    String retryInstant(Schedule s, String occIso) {
+        var nextSlot = computeNext(s, occIso)
+        var delayMin = retryDelayMin
+        // While the occurrence is STILL AHEAD we are inside the prep window: the
+        // failure was "could not prepare in time", and the answer is to try
+        // again SOON (a few minutes), not in 20 — otherwise the retry would land
+        // after the hour and the post would go out late, which is the opposite
+        // of the point of preparing ahead.
+        if (millisUntil(occIso) > 0) {
+            delayMin = config.int("publisher.prep.retry.min", 3)
+        }
+        if (delayMin <= 0) {
+            return ""
+        }
+        var sp = localOf(s.timezone(), time.now() + ((delayMin as Long) * 60000L))
+        if (sp == null) {
+            return ""
+        }
+        var retryAt = isoOf(sp)
+        // The retry must still fit before the occurrence (prep window) or before
+        // the next slot (after the hour).
+        var limit = nextSlot
+        if (millisUntil(occIso) > 0) {
+            limit = occIso
+        }
+        if (limit != "" && millisUntil(retryAt) >= millisUntil(limit)) {
+            return ""
+        }
+        return retryAt
+    }
+
+    // A slot only retries while it still has budget for the day.
+    Bool retryBudgetLeft(Schedule s, String occIso) {
+        if (retryMax <= 0 || occIso.length < 10) {
+            return false
+        }
+        return store.occurrencesForDay(s.name(), occIso.substring(0, 10)) <= retryMax
     }
 
     // Effective mode: schedule override > company mode > SAFE DEFAULT
@@ -68,10 +192,24 @@ class Scheduler {
     Schedule register(Schedule s) {
         var existing = store.findSchedule(s.name())
         var created = nowStamp()
+        var next = ""
         if (existing != null) {
             created = existing.created_at()
+            // Re-registering (`sync`) used to compute the next occurrence from
+            // created_at — the FIRST slot after the schedule was born. Days
+            // later that instant is in the past, and the running loop treats a
+            // past `next` as DUE, firing every restored clock at once. A still
+            // valid next is kept only when the definition did not change (so a
+            // same-day retry survives a sync); otherwise recompute from NOW.
+            var prev = existing.next_execution()
+            var sameShape = existing.clock() == s.clock() && existing.days() == s.days() && existing.interval_days() == s.interval_days() && existing.anchor_date() == s.anchor_date()
+            if (prev != "" && millisUntil(prev) > 0 && sameShape) {
+                next = prev
+            }
         }
-        var next = computeNext(s, created)
+        if (next == "") {
+            next = computeNext(s, nowStamp())
+        }
         if (next == "") {
             throw "schedule '" + s.name() + "': cannot compute next occurrence — timezone '" + s.timezone() + "' unavailable or days/at invalid"
         }
@@ -217,7 +355,7 @@ class Scheduler {
             //
             // Research is best-effort and honest: a source that fails is logged
             // and the slot is SKIPPED, never filled with an invented story.
-            var runR = researchRun(company.timezone(), company.researchSources(), listOf<String>(), "")
+            var runR = researchRun(company.timezone(), company.researchSources(), researchFeedUrls(company), "")
             run = runR
             for (var rn in run.notes()) {
                 log.info("pesquisa " + s.clock() + ": " + rn)
@@ -230,7 +368,7 @@ class Scheduler {
             for (var ht in store.recentTopics(12)) {
                 history.add(ht)
             }
-            var plan = buildPlan(company, store, run, 0, history)
+            var plan = buildPlan(company, store, run, 0, history, subjectWindow())
             var found = false
             for (var pc in plan.choices()) {
                 if (pc.clock() == s.clock()) {
@@ -288,13 +426,38 @@ class Scheduler {
                     // at all. Both mean "nothing honest to publish now" — the
                     // occurrence is skipped, never fabricated, and the window
                     // does NOT advance so the next run can cover it.
-                    if (e.startsWith("LAB-SKIP") || e.startsWith("SKIP")) {
-                        store.updateOccurrence(Occurrence(key, s.name(), occIso, "", "generation", "skipped", e, started, nowStamp()))
-                        observability.increment("publisher.content.skipped", 1)
-                        log.info("ocorrencia " + key + ": " + e + " (janela NAO avanca — amanha tenta de novo)")
-                        return ExecReport(key, "", "skipped", e)
+                    //
+                    // Qualquer outra String e uma falha de geracao honesta (o
+                    // LM respondeu erro, o draft veio vazio). Ela NAO pode ser
+                    // re-lancada daqui: um `throw` dentro do catch escapa do
+                    // try inteiro — o `catch (Throwable)` ao lado nunca ve — e
+                    // a ocorrencia ficava presa em `claimed`, sem registro e
+                    // sem retentativa. Medido em 2026-11-02. Resolvida e
+                    // registrada da mesma forma.
+                    var msg = e
+                    if (msg.startsWith("LAB-SKIP") || msg.startsWith("SKIP")) {
+                        log.info("ocorrencia " + key + ": " + msg + " (janela NAO avanca — amanha tenta de novo)")
+                    } else {
+                        log.warn("ocorrencia " + key + ": geracao falhou: " + msg)
                     }
-                    throw e
+                    store.updateOccurrence(Occurrence(key, s.name(), occIso, "", "generation", "skipped", msg, started, nowStamp()))
+                    observability.increment("publisher.content.skipped", 1)
+                    return ExecReport(key, "", "skipped", msg)
+                } catch (Throwable e) {
+                    // Um timeout do LM chega aqui como excecao NAO-String (no
+                    // log ela aparece enrolada num "... unexpected JSON char
+                    // ..."). Sem este catch ela escapava do laco do daemon e o
+                    // main imprimia "publisher: error" e ENCERRAVA o processo:
+                    // medido 2026-11-02, o daemon morreu as 11:54 na
+                    // retentativa do meio-dia e os posts das 15:00 e 18:00
+                    // nunca sairam. A ocorrencia e registrada e o daemon
+                    // continua vivo (ou se sai por STOP), devolvendo a
+                    // decisao a retentativa do dia.
+                    var em = e.toString()
+                    store.updateOccurrence(Occurrence(key, s.name(), occIso, "", "generation", "skipped", em, started, nowStamp()))
+                    observability.increment("publisher.content.skipped", 1)
+                    log.warn("ocorrencia " + key + ": geracao falhou (erro interno): " + em)
+                    return ExecReport(key, "", "skipped", "generation: " + em)
                 }
                 v = ed.validate(draft, recent)
                 if (v.ok()) {
@@ -348,12 +511,23 @@ class Scheduler {
             if (mode == "assisted") {
                 status = statusReview()
             }
+            // PREPARE-AHEAD: em autonomo, um rascunho gerado ANTES do horario
+            // fica AGENDADO para a hora exata em vez de ser publicado agora.
+            if (mode == "autonomous" && millisUntil(occIso) > 0) {
+                status = statusScheduled()
+            }
             store.savePublication(Publication(pubId, company.name(), topic, content, status, nowStamp(), occIso, "", target, lmModel(), company.digest(), s.name(), "", "", key, 0, topicId))
         }
         if (mode == "assisted") {
             store.updateOccurrence(Occurrence(key, s.name(), occIso, pubId, "review", "awaiting", "", started, ""))
             log.info("ocorrencia " + key + ": rascunho " + pubId + " em REVIEW aguardando aprovacao humana (assisted)")
             return ExecReport(key, pubId, "review", "awaiting approval")
+        }
+        if (millisUntil(occIso) > 0) {
+            // gerado com antecedencia: quem publica e o passe de agendados, na hora
+            store.updateOccurrence(Occurrence(key, s.name(), occIso, pubId, "prepared", "ready", "", started, ""))
+            log.info("ocorrencia " + key + ": texto pronto, sera publicado em " + occIso)
+            return ExecReport(key, pubId, "prepared", "aguardando o horario " + occIso)
         }
         var rep = publishWithRetry(key, s.name(), occIso, pubId, topic, content, started, target)
         if (rep.result() == "published" && company.sourceRepo() != "") {
@@ -370,10 +544,18 @@ class Scheduler {
         var createdAt = started
         var company1 = company.name()
         var ctx = company.digest()
+        // The link to the PAUTA must survive the publish lifecycle. These
+        // savePublication calls rewrite the whole row, and they used to pass ""
+        // for topic_id — so every PUBLISHED post lost its provenance, and
+        // `review` could no longer show the sources behind it (measured
+        // 2026-10-13: the 12:00 post was published with topic_id empty while its
+        // pauta existed). Carry the existing value forward.
+        var topicIdKeep = ""
         if (pub != null) {
             createdAt = pub.created_at()
             company1 = pub.company()
             ctx = pub.context_version()
+            topicIdKeep = pub.topic_id()
         }
         var target = resolveTarget(targetName)
         if (target == null) {
@@ -386,11 +568,11 @@ class Scheduler {
         var delay = attemptDelayMs
         var lastError = ""
         while (attempt <= maxAttempts) {
-            store.savePublication(Publication(pubId, company1, topic, content, statusPublishing(), createdAt, occIso, "", targetName, lmModel(), ctx, schedName, "", "", key, attempt, ""))
+            store.savePublication(Publication(pubId, company1, topic, content, statusPublishing(), createdAt, occIso, "", targetName, lmModel(), ctx, schedName, "", "", key, attempt, topicIdKeep))
             observability.increment("publisher.publication.started", 1)
             try {
                 var out = target.publish(content)
-                store.savePublication(Publication(pubId, company1, topic, content, statusPublished(), createdAt, occIso, nowStamp(), targetName, lmModel(), ctx, schedName, out.externalId(), "", key, attempt, ""))
+                store.savePublication(Publication(pubId, company1, topic, content, statusPublished(), createdAt, occIso, nowStamp(), targetName, lmModel(), ctx, schedName, out.externalId(), "", key, attempt, topicIdKeep))
                 store.updateOccurrence(Occurrence(key, schedName, occIso, pubId, "publication", "success", out.externalId(), started, nowStamp()))
                 observability.increment("publisher.publication.completed", 1)
                 log.info("ocorrencia " + key + ": publicada -> " + out.externalId())
@@ -421,7 +603,7 @@ class Scheduler {
             }
             attempt = attempt + 1
         }
-        store.savePublication(Publication(pubId, company1, topic, content, statusFailed(), createdAt, occIso, "", targetName, lmModel(), ctx, schedName, "", lastError, key, maxAttempts, ""))
+        store.savePublication(Publication(pubId, company1, topic, content, statusFailed(), createdAt, occIso, "", targetName, lmModel(), ctx, schedName, "", lastError, key, maxAttempts, topicIdKeep))
         store.updateOccurrence(Occurrence(key, schedName, occIso, pubId, "publication", "failed", lastError, started, nowStamp()))
         log.error("ocorrencia " + key + ": FAILED apos " + maxAttempts + " tentativas — " + lastError)
         return ExecReport(key, pubId, "failed", lastError)
@@ -470,9 +652,30 @@ class Scheduler {
         recoverAgenda()
         while (true) {
             daemonHeartbeat()
+            // Publica o que ja esta agendado e venceu (gerado com antecedencia).
+            // Se este passe falhar, o laço continua: os horarios seguem rodando
+            // e o rascunho continua `scheduled` para a proxima volta.
+            try {
+                publishDueScheduled()
+            } catch (Throwable e) {
+                log.error("daemon: passe de publicacoes agendadas falhou: " + e.toString())
+            }
+            // MIRROR: a fonte agora e o perfil enois do autor. A cada
+            // `enoisPollMin` minutos o daemon olha se ha post novo e
+            // compartilha o link no LinkedIn com uma legenda do proprio post.
+            if (enoisPollMin > 0 && (time.now() - lastEnoisPoll) >= ((enoisPollMin as Long) * 60000L)) {
+                pollEnoisOnce()
+            }
             var active = store.activeSchedules()
             if (active.size() == 0) {
-                log.warn("daemon: nenhuma agenda ativa — use 'publisher schedule' (aguardando)")
+                // With the enois mirror ON, "no active schedules" is the NORMAL
+                // state — the poll above is the trigger, and warning about it
+                // every 5s filled the log with identical lines (measured
+                // 2026-10-17). Without the mirror the warning is still the
+                // honest answer, so it stays in that case.
+                if (enoisPollMin <= 0) {
+                    log.warn("daemon: nenhuma agenda ativa — use 'publisher schedule' (aguardando)")
+                }
                 time.sleep(5000)
                 if (publisherStopRequested()) {
                     daemonCleanupPid()
@@ -497,7 +700,19 @@ class Scheduler {
                 if (s.next_execution() == "") {
                     continue
                 }
-                var delay = millisUntil(s.next_execution())
+                // Dispara a GERACAO `prepLeadMs` antes do horario; a publicacao
+                // sai na hora exata pelo passe acima. O adiantamento vale SO
+                // para a ocorrencia do RELOGIO: uma retentativa cai a poucos
+                // minutos de distancia, ou seja, DENTRO da janela de 10 min, e
+                // seria disparada no mesmo instante em que foi agendada — o
+                // orcamento de retentativa queimaria em segundos e o horario
+                // ficaria vazio (medido 2026-10-14). Retentativa roda na hora
+                // dela.
+                var lead = 0L
+                if (isClockRun(s)) {
+                    lead = prepLeadMs()
+                }
+                var delay = millisUntil(s.next_execution()) - lead
                 if (delay <= 0) {
                     due.add(s)
                 } else if (delay < bestDelayMs) {
@@ -507,8 +722,36 @@ class Scheduler {
             if (due.size() > 0) {
                 for (var s2 in due) {
                     var occIso = s2.next_execution()
-                    var report = runOccurrence(s2, occIso)
+                    // Um slot nunca pode derrubar o dia inteiro. Qualquer erro
+                    // interno de UMA ocorrencia vira "failed" (retentavel) e o
+                    // laco segue para o proximo slot — antes, uma excecao aqui
+                    // subia ate o main, que imprimia "publisher: error" e
+                    // encerrava o daemon (medido 2026-11-02).
+                    var report = ExecReport("", "", "failed", "")
+                    try {
+                        report = runOccurrence(s2, occIso)
+                    } catch (Throwable e) {
+                        var em = e.toString()
+                        log.error("agenda '" + s2.name() + "': falha interna em " + occIso + ": " + em)
+                        report = ExecReport(s2.name() + "@" + occIso, "", "failed", em)
+                    }
                     var next = computeNext(s2, occIso)
+                    // A slot that did NOT post gets another attempt later today.
+                    // "review" counts as a miss only in autonomous mode (in
+                    // assisted mode REVIEW is the intended outcome).
+                    var missed = report.result() == "skipped" || report.result() == "failed"
+                    if (!missed && report.result() == "review" && effectiveMode(s2) == "autonomous") {
+                        missed = true
+                    }
+                    if (missed && retryBudgetLeft(s2, occIso)) {
+                        var retryAt = retryInstant(s2, occIso)
+                        if (retryAt != "") {
+                            next = retryAt
+                            log.info("agenda '" + s2.name() + "': " + report.result() + " — nova tentativa em " + retryAt + " (orçamento de retentativa do dia)")
+                        } else {
+                            log.info("agenda '" + s2.name() + "': " + report.result() + " — sem espaco para nova tentativa antes do proximo horario")
+                        }
+                    }
                     store.saveSchedule(Schedule(s2.name(), s2.days(), s2.interval_days(), s2.anchor_date(), s2.clock(), s2.timezone(), s2.topic(), s2.mode(), s2.target(), s2.status(), next, occIso, s2.created_at(), nowStamp()))
                     log.info("agenda '" + s2.name() + "': ocorrencia " + occIso + " -> " + report.result() + "; proxima: " + next)
                 }

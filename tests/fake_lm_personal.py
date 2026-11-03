@@ -261,6 +261,91 @@ TESTCLAIM_EMBORA_TEXT = (
     "engenharia aplicada, sem hype. #engenharia"
 )
 
+# B: hardware/energy/precision claims about a product the blurb only NAMED.
+# The consulted summary says "a Aurora lancou um sensor de temperatura"; the
+# post adds battery life and a bit depth nobody published.
+HARDWARE_CLAIM_TEXT = (
+    "A Aurora lancou um sensor de temperatura domestico e o que me chama "
+    "atencao e a proposta de usar pouca bateria mantendo leitura precisa, "
+    "porque sensores baratos costumam trocar autonomia por exatidao. Se a "
+    "leitura realmente se mantem estavel sem recalibracao frequente, o ganho "
+    "nao esta no hardware em si, esta em nao precisar de manutencao constante "
+    "num dispositivo que fica esquecido num canto da casa. #hardware"
+)
+
+# A post written in PARAGRAPHS, separated by blank lines. The profile asks for
+# "poucos paragrafos grandes, 3 a 6 no post todo" and LinkedIn renders a blank
+# line as a paragraph break, so the publisher must NOT flatten these into one
+# dense block (it did: cleanDraft called strings.normalizeWhitespace, which
+# collapses newlines too).
+PARAGRAPH_TEXT = (
+    "Uso IA todo dia para o trabalho mecanico e isso me economiza tempo de "
+    "verdade, porque boilerplate nao precisa de atencao humana para nascer.\n\n"
+    "O que me incomoda nao e a ferramenta, e o discurso em volta dela, que "
+    "trata resposta probabilistica como se fosse garantia e transforma "
+    "aceitar sugestao em decidir arquitetura.\n\n"
+    "Meu criterio e simples, se o problema tem solucao deterministica eu "
+    "escrevo o codigo e sigo o dia, e a IA entra onde o espaco do problema e "
+    "aberto demais para regra fixa, sempre comigo conferindo o resultado."
+)
+
+# A draft where a phrase of the episode list ends one sentence and "eu" starts
+# the next: "ser viavel no dia a dia. Eu comecei com Java em 2009". It must NOT
+# be read as an episode (the mark "no dia a dia eu" only counts inside one
+# sentence). Measured from the real 12:00 draft of 2026-10-12.
+EPISODE_BOUNDARY_TEXT = (
+    "Essa pergunta sobre celular Linux virar alternativa real voltou a "
+    "circular essa semana e ela e boa porque nao e sobre gostar de Linux, e "
+    "sobre o que faz um telefone ser viavel no dia a dia. Eu comecei com Java "
+    "em 2009 no contexto de Symbian, entao vi de perto um sistema capaz que "
+    "foi engolido por ecossistema, driver e acordo com operadora."
+)
+
+# A post ABOUT Kof that the model wrote WITHOUT the mandatory signature. The
+# publisher must add the link and put the battle cry last (author-mandated, so
+# guaranteed deterministically rather than hoped for in the prompt).
+KOF_NO_SIGNATURE_TEXT = (
+    "O Kof 0.5.0-beta compila para JVM e o que me interessa nele nao e a "
+    "sintaxe bonita, e o fato de a linguagem tratar o alvo como contrato "
+    "explicito, entao o mesmo fonte tem chance de virar bytecode sem que eu "
+    "precise reescrever a regra de negocio para cada runtime."
+)
+
+# A post about kofbank (a COBOL project) that must NOT inherit the Kof battle
+# cry: the signature is about Kof, not about every repo whose name starts with
+# "kof".
+KOFBANK_NO_SIGNATURE_TEXT = (
+    "O kofbank corrigiu o calculo de juros compostos trocando a operacao "
+    "simples por arredondamento explicito, e o que me interessa ali nao e a "
+    "correcao em si, e a decisao de manter a regra contabil dentro do COBOL em "
+    "vez de espalhar a conta por uma camada moderna."
+)
+
+# A projects post that mentions "compilador" (the noun) and never claims the
+# build ran. The assertion "compila" matched INSIDE "compilador" and held this
+# kind of post back (measured 2026-10-13, a careful Kof4j post).
+COMPILER_NOUN_TEXT = (
+    "O log do Kof4j mostra uma correcao pequena e chata, a remocao de uma "
+    "definicao duplicada que tinha sido anexada em vez de substituir a "
+    "anterior, e isso diz mais sobre disciplina de compilador do que qualquer "
+    "anuncio de recurso novo. O que esta documentado no changelog e encontrado "
+    "no codigo nao e o mesmo que verificado rodando, e o repositorio tem pasta "
+    "de teste cujo nome nao prova cobertura. O comportamento observavel e o "
+    "que da para afirmar."
+)
+
+# A news post that restates the headline and ADMITS it could not go further.
+# This is what the author rejected on 2026-10-13: "o titulo ja diz tudo que da
+# para afirmar com seguranca". A translated headline is not a news post.
+HEADLINE_ONLY_TEXT = (
+    "Apareceu hoje esse texto com um titulo sobre uma alegacao de matematica, e "
+    "o titulo ja diz tudo que da para afirmar com seguranca, que existe a "
+    "alegacao e que alguem olhou a conta. Sem o texto integral nao da para "
+    "dizer se a prova fecha ou se o ganho se sustenta fora do benchmark "
+    "escolhido. O que da para dizer e o criterio, mostrar a derivacao e abrir o "
+    "codigo para reproducao."
+)
+
 # A text that is otherwise valid but contains a phrase a profile lists under
 # `# avoid` — the deterministic validator must reject it (never publish).
 FORBIDDEN_TEXT = (
@@ -268,6 +353,55 @@ FORBIDDEN_TEXT = (
     "dizem os consultores, e eu discordo porque software bom nasce de decisao "
     "tecnica chata e nao de palavra bonita em slide de reuniao trimestral. "
     "#engenharia"
+)
+
+# C: a README feature stated in the FUTURE tense ("Kof sera a camada de
+# integracao", "o design mira z/OS") asserted as ALREADY working. The digest
+# labels it [documentado]; the post may not upgrade it to a running feature.
+PLANNED_AS_DONE_TEXT = (
+    "O projeto ja esta em producao e a integracao com a camada moderna ja "
+    "funciona ponta a ponta, com o nucleo rodando em z/OS e o batch orquestrado "
+    "por JCL. A arquitetura foi validada e o codigo compila sem ajustes, o que "
+    "mostra maturidade do time na escolha de manter a logica de negocio no "
+    "COBOL enquanto expoe uma API para os consumidores novos. Nada disso e "
+    "plano, ja roda. #engenharia"
+)
+
+# K: plausible claims with NO evidence attached. The material for a projects
+# pauta is a read of the repo; the post asserts a capability nobody recorded.
+PLAUSIBLE_NO_EVIDENCE_TEXT = (
+    "O projeto trata concorrencia com um modelo de lock otimista que evita "
+    "deadlock por construcao e mantem a taxa de transferencia estavel mesmo "
+    "sob pico, porque o design separa leitura de escrita de forma limpa. Isso "
+    "e o tipo de decisao que so aparece quando alguem ja sofreu com contencao "
+    "de recurso em producao e resolveu atacar a raiz em vez do sintoma. O "
+    "resultado e um sistema previsivel. #engenharia"
+)
+
+# G: the SAME thesis as an earlier post, with different vocabulary. Used to
+# prove the semantic gate catches a reworded restatement the lexical memory
+# cannot see.
+SAME_THESIS_A = (
+    "Quebrar um monolito em microsservicos so porque esta na moda adiciona "
+    "latencia de rede e custo de manutencao sem resolver gargalo real, porque "
+    "a complexidade da distribuicao nao paga o proprio preco. #arquitetura"
+)
+
+SAME_THESIS_B = (
+    "Adotar uma arquitetura distribuida sem necessidade traz latencia entre "
+    "servicos e mais superficie de manutencao no lugar de um monolito que ja "
+    "funcionava, ja que o custo da separacao nao se justifica pelo ganho. "
+    "#arquitetura"
+)
+
+# H: the SAME SUBJECT with a DIFFERENT, justified conclusion. The semantic gate
+# must NOT collapse these into "the same thesis" — the spec explicitly allows a
+# return to a subject when the conclusion differs.
+SAME_SUBJECT_OTHER_ANGLE = (
+    "Microsservicos resolvem um problema real quando o gargalo e organizacional, "
+    "como autonomia de times e ciclos de deploy independentes, e nesse caso a "
+    "latencia extra e um preco aceitavel. O erro nao e distribuir, e distribuir "
+    "sem saber qual dor a separacao ataca. #arquitetura"
 )
 
 
@@ -306,6 +440,35 @@ BY_FUNCTION = {
     ),
 }
 
+# Two lexically DIFFERENT news drafts, alternated per call. Used by the
+# same-subject/different-stance test: the fixture must not return identical
+# text, or the LEXICAL anti-repetition gate discards the second draft and the
+# test stops measuring the SEMANTIC gate it is about.
+NEWS_VARY_A = (
+    "Saiu hoje mais uma versao de runtime e o que me interessa nela nao e o "
+    "numero da versao, e a mudanca de comportamento em como o coletor lida com "
+    "objetos de vida longa. #jvm"
+)
+NEWS_VARY_C = (
+    "Um projeto open source mudou de licenca essa semana e o efeito pratico "
+    "nao esta no texto da licenca, esta no que acontece com quem ja embarcou o "
+    "codigo e agora precisa decidir entre continuar ou trocar de dependencia. "
+    "#opensource"
+)
+NEWS_VARY_D = (
+    "Saiu um levantamento sobre quanto tempo times gastam em manutencao de "
+    "build e o numero e menos interessante que a distribuicao dele, porque "
+    "alguns poucos times puxam a media para cima com pipeline mal desenhado."
+)
+
+
+NEWS_VARY_B = (
+    "Apareceu um texto novo sobre como times escolhem arquitetura e o ponto "
+    "central dele e que a decisao costuma seguir o organograma antes de seguir "
+    "o problema tecnico, o que explica muita separacao de servico sem dor real."
+)
+
+
 def pick_reply(prompt: str, mode: str) -> str:
     if mode == "forbidden":
         return FORBIDDEN_TEXT
@@ -336,12 +499,58 @@ def pick_reply(prompt: str, mode: str) -> str:
         return TESTCLAIM_EMBORA_TEXT
     if mode == "absenceclaim" and "noticia" in label:
         return ABSENCE_CLAIM_TEXT
+    if mode == "hardwareclaim" and "noticia" in label:
+        return HARDWARE_CLAIM_TEXT
     if mode == "reactionclaim" and "noticia" in label:
         return REACTION_CLAIM_TEXT
     if mode == "unverifiedclaim" and "trabalho" in label:
         return UNVERIFIED_CLAIM_TEXT
+    if mode == "headlineonly":
+        return HEADLINE_ONLY_TEXT
+    if mode == "compilernoun":
+        return COMPILER_NOUN_TEXT
+    if mode == "kofnosign":
+        return KOF_NO_SIGNATURE_TEXT
+    if mode == "kofbanknosign":
+        return KOFBANK_NO_SIGNATURE_TEXT
+    if mode == "episodeboundary":
+        return EPISODE_BOUNDARY_TEXT
+    if mode == "paragraphs":
+        return PARAGRAPH_TEXT
     if mode == "encounter" and "trabalho" in label:
         return ENCOUNTER_TEXT
+    if mode == "planneddone" and "trabalho" in label:
+        return PLANNED_AS_DONE_TEXT
+    if mode == "plausible" and "trabalho" in label:
+        return PLAUSIBLE_NO_EVIDENCE_TEXT
+    # Semantic repetition: the SECOND call returns the reworded restatement of
+    # the first, so a run that plans two opinion slots hits the thesis gate on
+    # the second. Keyed on a call counter, not on the label, because the point
+    # is that two DIFFERENT slots argue the same thing.
+    if mode == "samethesis":
+        pick_reply.calls = getattr(pick_reply, "calls", 0) + 1
+        if pick_reply.calls == 1:
+            return SAME_THESIS_A
+        return SAME_THESIS_B
+    if mode == "newsvary":
+        # The draft is derived from the TOPIC in the prompt, so it is stable for
+        # a given candidate and DIFFERENT across candidates — and, crucially, it
+        # survives across processes. A per-process call counter resets when the
+        # test invokes `plan` a second time (a new JVM), which made the fixture
+        # repeat the same text and tripped the LEXICAL gate instead of the check
+        # under test.
+        pool = [NEWS_VARY_A, NEWS_VARY_B, NEWS_VARY_C, NEWS_VARY_D]
+        # Deterministic (Python's builtin hash() is randomised per process by
+        # PYTHONHASHSEED, which would make the fixture unstable).
+        acc = 0
+        for ch in prompt:
+            acc = (acc * 31 + ord(ch)) % 1000003
+        return pool[acc % len(pool)]
+    if mode == "samesubject":
+        pick_reply.calls = getattr(pick_reply, "calls", 0) + 1
+        if pick_reply.calls == 1:
+            return SAME_THESIS_A
+        return SAME_SUBJECT_OTHER_ANGLE
     for key, text in BY_CATEGORY.items():
         if key in label:
             return text

@@ -27,6 +27,36 @@ import json
 import re
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import datetime as _dt
+
+# ---- datas RELATIVAS (o fixture nao pode envelhecer) ----
+# Mesma licao do fake_research.py: data literal vira bomba-relogio assim que o
+# publisher compara com uma janela de atualidade (aqui, a idade maxima do repo
+# no slot de projetos). Calculado a partir do AGORA, preservando a ordem.
+_REF = _dt.datetime(2026, 10, 2, 10, 0, 0, tzinfo=_dt.timezone.utc)
+_BASE_HOURS = 3.0
+
+
+_ISO_CACHE = {}
+
+
+def iso_ago(hours):
+    # MEMOIZADO por valor: o fixture responde a MESMA data em toda requisicao.
+    # Sem isto o instante era recalculado a cada request, o `pushed_at` mudava
+    # entre duas execucoes do comando e a cache de repositorios nunca via "sem
+    # mudanca" — o teste de cache pegou exatamente isso (2026-10-17).
+    key = round(hours, 4)
+    if key not in _ISO_CACHE:
+        t = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=hours)
+        _ISO_CACHE[key] = t.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return _ISO_CACHE[key]
+
+
+def _hours_ago(iso):
+    t = _dt.datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_dt.timezone.utc)
+    return _BASE_HOURS + (_REF - t).total_seconds() / 3600.0
+
+
 
 ACCOUNT = "melmonfre"
 
@@ -87,13 +117,13 @@ def repos_for(mode):
     if mode == "empty":
         return []
     own = [
-        repo("melmonfre/kof-publisher", "Editorial publisher", "Kof", "2026-10-01T10:00:00Z", stars=3),
-        repo("melmonfre/kof-lang", "A linguagem Kof", "Java", "2026-09-20T10:00:00Z", stars=12, issues=2),
+        repo("melmonfre/kof-publisher", "Editorial publisher", "Kof", iso_ago(27.0000), stars=3),
+        repo("melmonfre/kof-lang", "A linguagem Kof", "Java", iso_ago(291.0000), stars=12, issues=2),
     ]
     if mode == "hostile":
         # GitHub lists a token's own private repos on the same endpoint. The
         # publisher must skip them, never read them.
-        private = repo("melmonfre/private-notes", "not for public eyes", "Kof", "2026-10-02T10:00:00Z")
+        private = repo("melmonfre/private-notes", "not for public eyes", "Kof", iso_ago(3.0000))
         private["private"] = True
         return own + [private]
     fork = [repo("melmonfre/some-fork", "a fork", "JavaScript", "2025-01-01T00:00:00Z", fork=True)]
@@ -105,7 +135,7 @@ def repos_for(mode):
 def org_repos(mode):
     if mode in ("org", "empty", "fail", "unknown", "noncontrib"):
         return []
-    return [repo("KofLang/kof4j", "Kof for the JVM", "Java", "2026-09-15T10:00:00Z")]
+    return [repo("KofLang/kof4j", "Kof for the JVM", "Java", iso_ago(411.0000))]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -194,7 +224,7 @@ class Handler(BaseHTTPRequestHandler):
         # /repos/<owner>/<name>/releases
         m = re.fullmatch(r"/repos/([^/]+)/([^/]+)/releases", path)
         if m:
-            return self._json([{"tag_name": "v1.2.0", "name": "v1.2.0", "published_at": "2026-09-30T00:00:00Z"}])
+            return self._json([{"tag_name": "v1.2.0", "name": "v1.2.0", "published_at": iso_ago(61.0000)}])
 
         # /repos/<owner>/<name>/contents/
         m = re.fullmatch(r"/repos/([^/]+)/([^/]+)/contents/", path)

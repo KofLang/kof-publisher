@@ -438,7 +438,8 @@ String persistPlanTopicFor(Store store, Company company, PlanCandidate c, String
         c.evidence(),
         "pendente",
         "",
-        joinList(store.recentTopics(3))))
+        joinList(store.recentTopics(3)),
+        thesisSignature(c.theme() + " " + arg)))
     for (var it in research.items()) {
         if (it.topic_key() != c.topic_key()) {
             continue
@@ -453,7 +454,9 @@ String persistPlanTopicFor(Store store, Company company, PlanCandidate c, String
             it.published_at(),
             it.fetched_at(),
             it.summary(),
-            it.source_type()))
+            it.source_type(),
+            researchExtent(it.summary(), it.source_type()),
+            strings.truncate(it.summary(), 300)))
     }
     return tid
 }
@@ -489,8 +492,15 @@ Int markTopicOutcome(Store store, String tid, String validation, String caveat) 
     store.saveTopic(TopicRecord(
         t.id(), t.topic_key(), t.theme(), t.argument(), t.category(), t.entities(),
         t.researched_at(), t.last_used_at(), t.similarity_hash(), t.status(), t.publication_id(),
-        t.evidence(), validation, caveat, t.related_topics()))
+        t.evidence(), validation, caveat, t.related_topics(), t.thesis_signature()))
     return 0
+}
+
+// How many recent editorial items the SUBJECT cooldown looks back over.
+// 4 posts a day, so 4 items ≈ "nao fale do mesmo assunto dois dias seguidos".
+// Configurable (publisher.subject.window) — set 0 to disable the cooldown.
+Int subjectWindow() {
+    return config.int("publisher.subject.window", 4)
 }
 
 // `plan` — build the day's four proposals from REAL material.
@@ -538,7 +548,7 @@ Int cmdPlan(Store store, Company company, List<String> args) {
     var run = ResearchRun(listOf<ResearchItem>(), listOf<String>(), 0)
     if (!noResearch) {
         println("Pesquisando fontes atuais...")
-        run = researchRun(company.timezone(), sources, listOf<String>(), "")
+        run = researchRun(company.timezone(), sources, researchFeedUrls(company), "")
         for (var n in run.notes()) {
             println("  " + n)
         }
@@ -555,7 +565,7 @@ Int cmdPlan(Store store, Company company, List<String> args) {
     if (strings.isNumeric(rawAge)) {
         repoMaxAgeDays = toIntStr(rawAge)
     }
-    var plan = buildPlan(company, store, run, repoMaxAgeDays, recentThemes)
+    var plan = buildPlan(company, store, run, repoMaxAgeDays, recentThemes, subjectWindow())
 
     println("Plano editorial — " + company.name() + " (" + cats.size() + " horarios, modo " + company.mode() + ", dry-run, NAO publica)")
     for (var n in plan.notes()) {
@@ -577,6 +587,12 @@ Int cmdPlan(Store store, Company company, List<String> args) {
             continue
         }
         var c = ch.candidate()
+        // A slot that succeeded may still have refused candidates first (e.g.
+        // "chose the architecture opinion because AI was in cooldown"). That
+        // reasoning is printed, not hidden.
+        if (ch.skip_reason() != "") {
+            println("nota: " + ch.skip_reason())
+        }
         // Try the planned candidate first; if its draft cannot be written
         // honestly, try the next candidates for the same slot. The rule is
         // explicit: when the material does not hold up, seek ANOTHER pauta
@@ -587,7 +603,7 @@ Int cmdPlan(Store store, Company company, List<String> args) {
         tries.add(c)
         var usedKeys = listOf<String>()
         usedKeys.add(c.topic_key())
-        var alts = planAlternates(company, store, run, repoMaxAgeDays, recentThemes, ch.function(), usedKeys)
+        var alts = planAlternates(company, store, run, repoMaxAgeDays, recentThemes, ch.function(), usedKeys, subjectWindow())
         var ai = 0
         while (ai < 3 && ai < alts.size()) {
             // Quality floor. An alternate is only worth trying if it is still
@@ -819,6 +835,10 @@ Int cmdReview(Store store, Company company, List<String> args) {
                 println("  veiculo    : " + sr.publisher() + " (" + sr.source_type() + ")")
                 println("  publicado  : " + firstNonEmpty(sr.published_at(), "(a fonte nao informou)"))
                 println("  consultado : " + sr.fetched_at())
+                // WHAT WAS ACTUALLY OBTAINED (spec §3). Without this the reader
+                // cannot tell a headline from a read blurb, and the whole point
+                // of the level ladder is that the two support different claims.
+                println("  extensao   : " + firstNonEmpty(sr.extent(), "(nao registrada — registro anterior a esta versao)"))
             }
         }
     }
@@ -1060,6 +1080,17 @@ Bool repoNeedsAnalysis(Store store, String fullName, String pushedAt, Bool force
 // public repos plus any declared org's, and persists a per-repo digest for
 // incremental use. It never writes to GitHub, never touches private repos,
 // never stores a credential, and never publishes anything.
+// Is `full` a fork the author declared as her own (`# github own_forks:`)?
+// Exact match or a bare repo name, same two forms as `include`.
+Bool repoInOwnForks(Company company, String full) {
+    for (var pat in company.github().ownForks()) {
+        if (full == pat || full.endsWith("/" + pat)) {
+            return true
+        }
+    }
+    return false
+}
+
 Int cmdGithub(Store store, Company company, List<String> args) {
     if (!company.github().enabled()) {
         println("publisher: github desabilitado — declare a secao '# github' com 'account:' e 'enabled: true' em " + company.path())
@@ -1193,8 +1224,20 @@ Int cmdGithub(Store store, Company company, List<String> args) {
             }
         }
         if (repo.fork()) {
-            forks = forks + 1
-            continue
+            // A fork is normally third-party code and is skipped. But an
+            // EXPLICIT entry in `include` is the author saying "this one is
+            // mine, track it": a project she forked and now actively develops
+            // (measured 2026-10-12: melmonfre/vibe-os, a fork with a push from
+            // minutes earlier, was invisible to the projects slot precisely
+            // because the fork rule fired before any include could apply). The
+            // explicit declaration wins; the blanket rule still applies to
+            // every fork she did NOT name.
+            if (repoInOwnForks(company, full)) {
+                forks = forks + 1
+            } else {
+                forks = forks + 1
+                continue
+            }
         }
         // AUDIT FIX (AUD-2): a repo the API marks private is NEVER read, even if
         // it appears in the listing (a token with private scope can surface it).
@@ -1250,6 +1293,26 @@ Int cmdGithub(Store store, Company company, List<String> args) {
     println("resumo: " + candidates.size() + " repo(s) publico(s); " + analyzed + " analisado(s) agora, " + skipped + " em cache, " + forks + " fork(s) ignorado(s), " + privateSkipped + " privado(s) nao lido(s).")
     println("        material documentado=" + docCount + "  encontrado_no_codigo=" + foundCount + "  com_testes_no_nome=" + testsFound + "  verificado_aqui=" + verified)
     println("        o material vai para o proximo 'plan'/'generate' como fonte citada; nada foi publicado.")
+    return 0
+}
+
+// `mirror` — one poll of the author's enois profile: any NEW post becomes a
+// LinkedIn share of its public link, with a caption written from the post.
+// `--dry` shows exactly what would be shared without publishing.
+Int cmdMirror(Store store, Company company, List<String> args) {
+    var dry = hasFlag(args, "--dry")
+    var targetName = firstNonEmpty(company.publishingTarget(), "linkedin")
+    println("---- espelho enois -> " + targetName + (if (dry) "  (DRY RUN, nada e publicado)" else "") + " ----")
+    var rep = mirrorPoll(store, company, dry)
+    println("perfil      : " + firstNonEmpty(enoisProfileUrl(), "(enois nao configurado)"))
+    println("posts lidos : " + rep.listed())
+    println("novos       : " + rep.fresh())
+    println("compartilh. : " + rep.shared())
+    println("ignorados   : " + rep.skipped())
+    println("falhas      : " + rep.failed())
+    for (var l in rep.lines()) {
+        println("  " + l)
+    }
     return 0
 }
 
@@ -1657,6 +1720,9 @@ Int publisherMain(List<String> args) {
             }
             if (cmd == "db-prune") {
                 return cmdDbPrune(store, company, rest)
+            }
+            if (cmd == "mirror") {
+                return cmdMirror(store, company, rest)
             }
             if (cmd == "daemon") {
                 return cmdDaemon(store, company)

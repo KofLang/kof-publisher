@@ -346,35 +346,331 @@ LM: estilo `openai` autodetectado quando a URL contém `/v1` (beta-llm;
 `reasoning_effort=none` senão o thinking come o budget), Ollama caso
 contrário (`"think":false` por default pelo mesmo motivo).
 
-## Testes — 89/89 verdes (kof instalado 0.5.0-beta e dev-jar)
+## Testes — 128/128 verdes (kof instalado 0.5.0-beta e dev-jar)
 
 ```bash
 rm -rf build/classes && kof build src --target jvm
 kof test src/Recurrence.kf --target jvm                  # 6  calendario/timezone
 kof test src/Model.kf --target jvm                       # 4  maquina de estados + loader
 kof test src/Memory.kf --target jvm                      # 4  memoria editorial (lexical)
+kof test src/Thesis.kf --target jvm                      # 5  memoria editorial (semantica: assinatura + polaridade)
 kof test tests/Cli.kf --target jvm --timeout 140         # 8  e2e CLI (binario real)
 kof test tests/FakeLm.kf --target jvm --timeout 220      # 3  pipeline+LM fake+daemon
 kof test tests/KofLab.kf --target jvm --timeout 260      # 4  fatos da lab+skip+estilo+marker
 kof test tests/Personal.kf --target jvm --timeout 260    # 4  perfil pessoal: plan/categorias/repeticao/material
 kof test tests/Identity.kf --target jvm --timeout 260    # 7  identidade: fatos/opinioes no prompt, avoid, episodio inventado, alegacao de leitura, acao em primeira pessoa
 kof test tests/Github.kf --target jvm --timeout 300      # 12 github: evidencia/cache/sanitizacao/falha honesta
-kof test tests/Service.kf --target jvm --timeout 300     # 5  start/stop/status (sem duplicata, preserva estado, daemon pesquisa)
-kof test tests/Targets.kf --target jvm --timeout 120     # 3  fronteira de publicacao (stub local; assisted nunca chama a API)
+kof test tests/Service.kf --target jvm --timeout 600     # 8  start/stop/status (sem duplicata, preserva estado, daemon pesquisa, retentativa, geracao antecipada, falha do LM nao derruba o processo)
+kof test tests/Targets.kf --target jvm --timeout 300     # 4  fronteira de publicacao (stub local; assisted nunca chama a API; autonomo+perfil pessoal publica 1x e nao persiste o token)
 kof test tests/Research.kf --target jvm --timeout 200    # 12 pesquisa online + retencao/migracao do banco
+kof test src/Enois.kf --target jvm                       # 7  cliente do enois (url publica, html->texto, entidades, espacos, css/script)
+kof test tests/Mirror.kf --target jvm --timeout 600       # 4  espelho: linha de base, post novo->link+legenda, sem texto, PAGE pelo detalhe
 kof test tests/Planning.kf --target jvm --timeout 300    # 17 selecao + integracao + propriedade/ausencia/reacao/episodio/teste/build nao afirmados
+kof test tests/Adversarial.kf --target jvm --timeout 300 # 19 cenarios: A-P (titulo so, produto, feature futura, tese repetida, tese oposta, sem fonte, sem data, plausivel sem evidencia, falha apos retries) + paragrafos, repo distinto, frase partida, assinatura Kof (com/sem), candidato de observacao nao recusado por boilerplate, "compilador" nao e "compila", noticia so com manchete (rejeitada no rascunho e fora do pool), assunto em cooldown nao volta
 ```
 Os E2E sobem fixture HTTP (Ollama-compatible para o LM, REST v3 para o GitHub;
 só o *modelo* e o *GitHub* são determinísticos; http/json/orm/targets/daemon/
 process são reais). `KOF_LM_LIVE=<modelo>` roda o mesmo fluxo contra o LM de
 verdade. Paths: `KOF_PUBLISHER_DIR|CLASSES`, `KOF_SQLITE_JAR`.
 
-**Limite honesto da memória editorial**: a detecção de repetição é *lexical*
-(abertura/conclusão + sobreposição de n-gramas), porque o runtime Kof não tem
-busca semântica/embeddings. Isso pega "mesmas palavras apresentadas como
-novidade"; **não** pega uma tese reformulada com outras palavras. Um check
-semântico exigiria uma chamada de modelo que o projeto não orça hoje — o proxy
-lexical é proporcional e a lacuna fica declarada, não escondida.
+**Memória editorial em duas camadas.** A camada *lexical* (`src/Memory.kf`)
+compara abertura/conclusão e n-gramas: pega "mesmas palavras apresentadas como
+novidade". A camada *semântica* (`src/Thesis.kf`) compara a **tese** — palavras
+de conteúdo dobradas por sinônimos, sem stopwords, com detecção de polaridade —
+para pegar a tese reformulada com outras palavras. A assinatura fica gravada em
+`topicrecord.thesis_signature` (migração 002) e a comparação roda **antes da
+geração** (pauta repetida é recusada, não só penalizada).
+
+**Limite honesto que permanece:** a camada semântica é determinística e por
+isso ainda não pega duas teses que usem vocabulário *genuinamente* diferente
+("complexidade acidental" vs "overengineering"). Ela também não normaliza
+conjugação verbal. A adjudicação por modelo existe como opção explícita
+(`--thesis-lm`), desligada por padrão, e sua lacuna fica declarada.
+
+## Base de conhecimento dos repositorios (refresh agendado)
+
+O daemon **nao** consulta o GitHub sozinho: ele le o que o comando `github` ja
+persistiu na tabela `repostate`, e essa analise e **incremental** (um repo cujo
+`pushed_at` nao mudou nao e relido). Sem uma atualizacao periodica, o slot das
+**06:00** (trabalho real e projetos) enxerga o retrato do dia anterior.
+
+`tools/github-refresh.sh` faz essa atualizacao. Ele roda **antes das 06:00** e
+**nao publica nada** — o comando e somente leitura.
+
+```bash
+# cron (instalado nesta maquina, 05:30 diario)
+30 5 * * * /home/mel/Documentos/kof-publisher/tools/github-refresh.sh >> ~/.kof/publisher/github-refresh.log 2>&1
+```
+
+Tambem ha um template systemd para quem prefere timer de usuario:
+`tools/systemd/kof-github-refresh.{service,timer}` (05:30, `Persistent=true`).
+
+O token vem de `~/.local/share/kof/github-secrets.env` (chmod 600) e, na falta
+dele, de `gh auth token`. O script resolve o binario `java` explicitamente —
+sob o PATH minimo do cron (`/usr/bin:/bin`) o `java` do sdkman nao existe
+(medido), e o job falharia em silencio.
+
+## Espelho do enois (modo alternativo, DESLIGADO)
+
+**2026-10-17:** o publisher passou a espelhar o **perfil do autor no enois**
+(`enois.ia.br/perfil/aminadojava`) em vez de publicar por horario. Em
+**2026-11-01** o autor pediu a volta do modelo anterior, e o modo ativo voltou a
+ser o de **publicacoes programadas** (06/12/15/18). O espelho nao foi removido:
+continua no codigo e testado, desligado por padrao
+(`publisher.enois.poll.min = 0`). Religado, o daemon faz o seguinte a cada
+`publisher.enois.poll.min` minutos:
+
+1. le os posts recentes do perfil (`GET /api/users/{id}/posts`);
+2. ve quais sao **novos** (ledger `enoisseen` no SQLite — um post nunca e
+   compartilhado duas vezes, e um daemon reiniciado continua de onde parou);
+3. le o texto do post (para posts `PAGE`, o texto so vem no endpoint de detalhe,
+   dentro de `pageHtml` — o cliente busca);
+4. escreve uma **legenda** a partir do proprio texto do post;
+5. compartilha o **link publico** do post (`/post/<id>`) no LinkedIn, com a
+   legenda, via `content.article` (o LinkedIn monta o cartao do link).
+
+```
+kof.config / env            default
+enois.username              (obrigatorio)
+enois.site                  https://enois.ia.br
+publisher.enois.poll.min    0     (0 = desligado; 10 religa o espelho)
+publisher.enois.min.chars   40    (post curto demais nao tem o que legendar)
+publisher.enois.max.per.poll 2    (no maximo 2 compartilhamentos por ciclo)
+publisher.enois.limit       20    (quantos posts recentes ler)
+```
+
+### Tres regras que valem a pena saber
+
+- **A primeira execucao so marca a linha de base.** Num ledger vazio todo post
+  pareceria novo e o LinkedIn receberia uma rajada de posts antigos. O primeiro
+  ciclo registra o que ja existe como visto e **nao publica nada**; a partir dai
+  so post escrito depois vira compartilhamento. (`publisher.enois.backfill=true`
+  forca o contrario, conscientemente.)
+- **Nada e inventado.** A legenda sai do texto do post e o post e a fonte. Post
+  sem texto legivel e **ignorado** e registrado como tal — nunca legendado por
+  imaginacao.
+- **Ordem cronologica.** Se um ciclo achar mais de um post novo, eles saem do
+  mais antigo para o mais novo.
+
+Comandos:
+
+```
+publisher mirror --company examples/mel.kofmd --store <db>          # um ciclo
+publisher mirror ... --dry    # mostra o que sairia, sem publicar nada
+```
+
+### Fixtures com data RELATIVA (a suite nao pode envelhecer)
+
+As fixtures de pesquisa e de GitHub tinham datas literais (`2026-10-10T12:00:00Z`).
+O publisher descarta material mais velho que `research_max_age_hours` (168h nos
+perfis de teste), entao a suite passava numa semana e comecava a falhar sozinha
+na seguinte — em 2026-10-17, 9 das 11 datas ja tinham passado da janela e o
+Planning caiu de 17/17 para 6/17 sem nenhuma mudanca de codigo. Agora cada data
+e calculada a partir do AGORA (`iso_ago`), preservando a ordem e a distancia
+relativa, e **memoizada por valor**: o fixture responde a MESMA data em toda
+requisicao. Sem a memoizacao o instante era recalculado a cada request, o
+`pushed_at` mudava entre duas execucoes e a cache de repositorios nunca via "sem
+mudanca" (o teste de cache pegou exatamente isso).
+
+Faltou o outro lado: o teste de Research continuava afirmando a data literal
+`2026-10-10T12:00:00Z` de um item, que a fixture relativa nunca mais produziria.
+Era diagnosticado como "falha intermitente sob carga", mas falhava sempre. A
+assercao agora verifica que as DUAS datas (publicacao e consulta) vem presentes
+e em ISO-8601 — o que o teste precisa provar — em vez do instante exato.
+
+### As agendas por horario estao ATIVAS de novo
+
+Os quatro horarios (06/12/15/18) estavam cancelados desde 2026-10-17, quando o
+espelho do enois virou o gatilho. Em **2026-11-01** os blocos `# schedule`
+voltaram para `examples/mel.kofmd`, `publisher sync` os reativou e o espelho foi
+desligado (`KOF_ENOIS_POLL_MIN=0`). O motor de agenda nunca saiu do codigo nem
+da suite.
+
+Uma armadilha corrigida nessa volta: `register`/`sync` calculava a proxima
+ocorrencia a partir de `created_at`, ou seja, o PRIMEIRO horario depois que a
+agenda nasceu. Reativando uma agenda de dias atras isso caia no passado, e o
+laco do daemon trata qualquer `next` passado como VENCIDO — um `sync` com o
+daemon rodando dispararia os quatro horarios de uma vez. Agora um `next` futuro
+so e preservado quando a definicao (clock/days/every/anchor) nao mudou (para nao
+perder uma retentativa do dia); caso contrario ele e recalculado a partir de
+AGORA.
+
+## Cooldown de ASSUNTO (nao falar de IA todo dia)
+
+A comparacao de tese decide se o ARGUMENTO e novo. Falta um nivel acima: o
+**assunto**. Tres posts sobre IA podem defender coisas diferentes e ainda assim
+ser "IA de novo" — foi a reclamacao do autor em 2026-10-13 ("nao da pra ficar
+falando de ia todo dia"). O gate de tese nao via isso porque "ia" tem 2 letras e
+era descartado da assinatura, e porque as tres opinioes de IA usam palavras
+diferentes.
+
+O perfil declara a taxonomia em `# editorial subjects`:
+
+```
+subjects:
+  - ia: IA, llm, modelo, modelos, generativa, prompt, tokens, alucinacao
+  - arquitetura: arquitetura, microsservico, monolito, distribuido
+  - legado: legado, cobol, mainframe, z/os
+  ...
+```
+
+O nome antes dos dois-pontos e o rotulo que aparece no relatorio; as palavras
+disparam o assunto. Um assunto usado nos ultimos **4** itens editoriais
+(`publisher.subject.window`, 0 desliga) nao e escolhido de novo — com 4 posts
+por dia, isso significa "nao dois dias seguidos". A sigla **IA** e casada
+**preservando maiusculas**, senao "eu ia fazer" contaria como o assunto.
+
+Quando um slot recusa candidatos por repeticao e escolhe outro, o motivo
+aparece no relatorio mesmo com o slot preenchido:
+
+```
+---- 15:00  [contraponto tecnico (anti-hype)] ----
+nota: 2 candidato(s) recusado(s) antes deste (assunto 'ia' em cooldown)
+```
+
+## Post de noticia exige conteudo, nao manchete
+
+Um item de agregador traz o titulo e a linha de placar ("212 pontos na front
+page"). Escrever a partir disso produz um post que apenas repete a manchete e
+admite que nao conseguiu verificar nada — o autor rejeitou exatamente isso em
+2026-10-13. Duas defesas:
+
+1. **No pool** (`planResearchCandidates`): so vira candidato de noticia o item
+   cujo `extent` seja `resumo` — algo que a FONTE publicou sobre o item. Item
+   so com manchete/metadados e descartado, e o motivo do SKIP diz isso. O
+   cliente do Hacker News passou a usar o corpo do texto (`story_text`) quando
+   existe, em vez de so o placar.
+2. **No rascunho** (`validateFactual`): se o texto ADMITE que nao tem nada alem
+   da manchete ("o titulo ja diz tudo", "sem o texto integral nao da para
+   dizer"), o post e recusado — e a manchete traduzida que a especificacao
+   proibe.
+
+Consequencia honesta: o slot das 12:00 pode ficar **vazio** em dias em que as
+fontes so trazem manchetes. Isso e o comportamento correto — melhor um horario
+sem post do que um post que nao diz nada.
+
+## Geracao antecipada (texto pronto antes da hora)
+
+O texto e **gerado `publisher.prep.lead.min` minutos ANTES** do horario (default
+10) e **publicado na hora exata**. Sem isto, gerar no proprio horario significa
+que qualquer lentidao de rede ou rejeicao do gate faz o post perder a hora;
+gerando antes, o texto ja esta validado e esperando quando o relogio chega.
+
+Fluxo de um horario (ex.: 12:00, com lead de 10 min):
+
+1. **11:50** — o daemon roda o pipeline (pesquisa, selecao, geracao, gates) e
+   salva o texto como `scheduled` para 12:00.
+2. **12:00** — um passe separado do daemon (`publishDueScheduled`, roda a cada
+   ciclo) publica o que ja estava agendado e venceu.
+
+Se a geracao **falhar na janela** (sem material, ou gate factual barrou), o
+daemon tenta de novo em `publisher.prep.retry.min` minutos (default 3, curto de
+proposito) — e nao nos 20 da retentativa normal — para ainda pegar a hora. A
+retentativa respeita o horario: nunca agenda uma tentativa depois do horario
+alvo (na janela) nem depois do proximo slot (fora da janela).
+
+O adiantamento vale **so para a ocorrencia do relogio** (a que tem `HH:MM` igual
+ao `clock` da agenda). Uma **retentativa** cai a poucos minutos de distancia — ou
+seja, dentro da janela de 10 min — e seria disparada no mesmo instante em que foi
+agendada, queimando o orcamento de retentativa em segundos e deixando o horario
+vazio. Retentativa roda na hora dela. (Bug real, pego pelo teste de retentativa
+em 2026-10-14; o codigo agora decide por `isClockRun`.)
+
+| chave | env | o que faz |
+|---|---|---|
+| `publisher.prep.lead.min` | `KOF_PUBLISHER_PREP_LEAD_MIN` | minutos de antecedencia da geracao (10; 0 desliga) |
+| `publisher.prep.retry.min` | `KOF_PUBLISHER_PREP_RETRY_MIN` | minutos ate a nova tentativa dentro da janela (3) |
+
+Em modo `assisted` nada disto muda: o rascunho continua indo para REVIEW.
+
+## Retentativa do horario (nao perder o post do dia)
+
+Se um horario **nao consegue postar** — a pesquisa nao achou candidato, ou o
+gate factual barrou o rascunho — o daemon **tenta de novo mais tarde no mesmo
+dia**, em vez de esperar 24h. A nova tentativa refaz o pipeline inteiro
+(pesquisa nova, selecao nova), porque a causa costuma ser "nao ha material
+agora" e o material muda ao longo do dia.
+
+Regras (todas configuraveis, defaults entre parenteses):
+
+| chave | env | o que faz |
+|---|---|---|
+| `publisher.retry.max` | `KOF_PUBLISHER_RETRY_MAX` | maximo de ocorrencias daquele horario por dia (3) |
+| `publisher.retry.delay.min` | `KOF_PUBLISHER_RETRY_DELAY_MIN` | minutos ate a nova tentativa (20) |
+
+A retentativa **nunca passa por cima do proximo horario**: se nao couber antes
+dele, e descartada (o proximo horario roda de qualquer forma). E **nunca inventa
+conteudo**: uma retentativa que tambem nao acha material honesto continua
+pulando, dentro do orcamento. Em modo `assisted` o `REVIEW` e o resultado
+esperado, entao nao conta como falha; em `autonomous`, um rascunho retido conta
+como falha e entra na retentativa.
+
+## Subir o servico (start reproduzivel)
+
+O daemon herda o ambiente de quem o inicia, e nem os segredos nem os ajustes de
+retry vivem em arquivo de configuracao — um `publisher start` a mao sobe sem
+token. Use o script:
+
+```bash
+tools/kof-publisher-service.sh start|stop|status|logs
+```
+
+Ele faz o `source` dos segredos (`kof-lm.env`, `linkedin-secrets.env`,
+`github-secrets.env`), liga o opt-in de perfil pessoal **so no ambiente do
+processo**, e define a janela de retry maior. Nada de credencial vai para o
+perfil, para o banco ou para o log.
+
+## Repeticao: comparar o SUJEITO, nunca um template
+
+O gate de repeticao compara o **sujeito** do candidato, e cada origem tem uma
+forma propria — usar a errada foi a causa de dois slots vazios no mesmo dia:
+
+| origem | o que e comparado | por que |
+|---|---|---|
+| `repo` | **identidade** (o nome do repositorio) | o tema e um template ("atualizacao no projeto X") que todo repo compartilha |
+| `profile` | **so o `theme`** | o `argument` repete o texto ou e um boilerplate comum a toda a lista |
+| `research` | `theme` + `argument` | titulo e resumo sao conteudo real, sem boilerplate |
+
+Medido em 2026-10-12: comparar o template dos repos fez dois repos **diferentes**
+marcarem 88% e recusou os 16 (slot das 06:00 vazio); comparar o boilerplate dos
+`rejects` fez onze itens **nao relacionados** marcarem 47-53% e recusou os 11
+(slot das 18:00 vazio). Os dois casos tem teste de regressao.
+
+## Janela de retry da publicacao
+
+O padrao do codigo e 3 tentativas com 2s de espera (~6s no total) — curto demais
+para uma oscilacao real de rede: medido em 2026-10-12, uma falha transitoria
+queimou as 3 tentativas em 6 segundos e marcou o post do dia como `failed`. Em
+producao o daemon sobe com uma janela maior, por env (o config do Kof resolve
+`publisher.attempts` como `KOF_PUBLISHER_ATTEMPTS`):
+
+```bash
+export KOF_PUBLISHER_ATTEMPTS=5
+export KOF_PUBLISHER_ATTEMPT_DELAY_MS=10000   # 10s, dobrando: ~2min30 no total
+```
+
+O default do codigo fica curto de proposito: os testes de recusa de credencial
+precisam terminar rapido.
+
+## Assinatura do Kof (grito de guerra + link)
+
+Kof e a linguagem da autora e o projeto principal dela. **Todo** post que fale
+do Kof (a linguagem, Kof4j, KofOS, o ecossistema) recebe automaticamente, no
+fim:
+
+```
+https://koflang.github.io
+
+KOFFIE VOOR IEDEREEN
+```
+
+O grito de guerra e sempre a **ultima linha**. Isso e garantido por codigo
+(`ensureKofSignature`), nao apenas pedido no prompt — o modelo esquece, e uma
+assinatura obrigatoria nao deveria depender de revisao manual. A deteccao e por
+token inteiro: `kofbank` **nao** herda a assinatura (e um projeto COBOL). O link
+da assinatura tambem e excluido da checagem de rastreabilidade (ele nao e uma
+fonte consultada). O slot das **06:00** tambem pode escolher uma noticia ou
+curiosidade sobre o Kof, nao so uma mudanca de commit.
 
 ## Idempotência (aceitação §12/§13)
 

@@ -76,6 +76,15 @@ Bool lmAvailable() {
     }
 }
 
+// A falha de transporte volta como ENVELOPE DE ERRO, nunca como se fosse o
+// corpo da resposta.
+//
+// Antes ela voltava como `e.toString()` cru — `java.net.http.HttpTimeout-
+// Exception: request timed out` — e o chamador entregava essa string ao
+// `json.decode`, que estourava com "unexpected JSON char 'j'". Medido em
+// 2026-11-02 no daemon de producao: um timeout real do endpoint do modelo
+// chegou assim na geracao e derrubou o processo, matando os posts seguintes do
+// dia. O prefixo `{"error":` e o que os completions ja sabem reconhecer.
 String httpPostSafe(String url, String body, String contentType, String auth) {
     try {
         if (auth != "") {
@@ -83,7 +92,7 @@ String httpPostSafe(String url, String body, String contentType, String auth) {
         }
         return http.post(url, body, contentType)
     } catch (Exception e) {
-        return e.toString()
+        return "{\"error\":\"" + strings.escapeJson("lm: request failed: " + e.toString()) + "\"}"
     }
 }
 
@@ -110,6 +119,38 @@ LmResult lmComplete(String system, String prompt) {
     return lmCompleteOllama(system, prompt, t0)
 }
 
+// Runs the POST behind spawn and ALWAYS returns a String — never throws.
+//
+// `done(h)` ficava verdadeiro tambem quando o timeout do JDK estourava, e ai
+// `poll(h)` lancava a excecao Java direto para quem chamou, fora do
+// `httpPostSafe` (o catch dele ja tinha passado). Medido em 2026-11-02 no
+// daemon de producao: um timeout real do endpoint do modelo chegou como
+// excecao nao-String na geracao e derrubou o processo inteiro, matando os
+// posts seguintes do dia. O catch aqui e `Throwable` de proposito: e a borda
+// que separa a falha de uma requisicao da liveness do processo.
+String lmSpawnRaw(String url, String body, String contentType, String auth, Long t0) {
+    http.timeout(lmTimeoutSec())
+    var h = spawn httpPostSafe(url, body, contentType, auth)
+    var limitMs = lmTimeoutSec() * 1000 + 10000
+    while (time.now() - t0 < limitMs && !done(h)) {
+        time.sleep(50)
+    }
+    if (!done(h)) {
+        return ""
+    }
+    var raw = ""
+    try {
+        var v = poll(h)
+        raw = v as String
+        if (raw == null) {
+            raw = ""
+        }
+    } catch (Throwable e) {
+        raw = "{\"error\":\"" + strings.escapeJson("lm: request failed: " + e.toString()) + "\"}"
+    }
+    return raw
+}
+
 LmResult lmCompleteOpenAi(String system, String prompt, Long t0) {
     var key = lmApiKey()
     if (key == "") {
@@ -128,20 +169,10 @@ LmResult lmCompleteOpenAi(String system, String prompt, Long t0) {
         body = body + ",\"reasoning_effort\":\"none\""
     }
     body = body + "}"
-    http.timeout(lmTimeoutSec())
-    var h = spawn httpPostSafe(oaiUrl(), body, "Content-Type: application/json", "Authorization: Bearer " + key)
-    var raw = ""
-    var limitMs = lmTimeoutSec() * 1000 + 10000
-    while (time.now() - t0 < limitMs && !done(h)) {
-        time.sleep(50)
-    }
-    if (done(h)) {
-        var v = poll(h)
-        raw = v as String
-    }
+    var raw = lmSpawnRaw(oaiUrl(), body, "Content-Type: application/json", "Authorization: Bearer " + key, t0)
     var ms = (time.now() - t0) as Int
     if (raw.startsWith("{\"error\":")) {
-        return LmResult("", false, "lm: server error: " + strings.truncate(raw, 300), ms)
+        return LmResult("", false, "lm: server error: " + strings.truncate(raw, 300) + " | url=" + redactUrlCreds(oaiUrl()), ms)
     }
     if (raw == "") {
         return LmResult("", false, "lm: no response from /chat/completions at " + lmUrl(), ms)
@@ -175,20 +206,10 @@ LmResult lmCompleteOllama(String system, String prompt, Long t0) {
     }
     body = body + "\"stream\":false,\"options\":{\"temperature\":" + (lmTempPercent() / 100.0)
     body = body + ",\"num_predict\":" + lmTokens() + "}}"
-    http.timeout(lmTimeoutSec())
-    var h = spawn httpPostSafe(lmUrl() + "/api/chat", body, "Content-Type: application/json", "")
-    var raw = ""
-    var limitMs = lmTimeoutSec() * 1000 + 10000
-    while (time.now() - t0 < limitMs && !done(h)) {
-        time.sleep(50)
-    }
-    if (done(h)) {
-        var v = poll(h)
-        raw = v as String
-    }
+    var raw = lmSpawnRaw(lmUrl() + "/api/chat", body, "Content-Type: application/json", "", t0)
     var ms = (time.now() - t0) as Int
     if (raw.startsWith("{\"error\":")) {
-        return LmResult("", false, "lm: server error: " + strings.truncate(raw, 300), ms)
+        return LmResult("", false, "lm: server error: " + strings.truncate(raw, 300) + " | url=" + redactUrlCreds(lmUrl()), ms)
     }
     if (raw == "") {
         return LmResult("", false, "lm: no response from /api/chat at " + lmUrl(), ms)

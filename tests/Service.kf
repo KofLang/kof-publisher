@@ -255,6 +255,17 @@ void stopLm(String name) {
 
 // A one-category profile whose only slot is the news slot, plus the schedule
 // that fires it.
+// The same profile but AUTONOMOUS. The retry and the prepare-ahead only exist
+// in autonomous mode: in assisted, REVIEW is the intended outcome and there is
+// no "missed" slot and nothing scheduled to publish. The tests below used the
+// assisted fixture and were measuring the wrong mode (measured 2026-10-13).
+String autonomousCompany() {
+    // target dryrun de proposito: o teste precisa OBSERVAR a publicacao, e um
+    // target linkedin aqui tentaria a rede real. dryrun grava o texto num
+    // diretorio e devolve "published", que e o que a assercao mede.
+    return researchCompany().replace("mode: assisted", "mode: autonomous").replace("target: linkedin", "target: dryrun")
+}
+
 String researchCompany() {
     var c = "# company\nname: Daemon Pesquisa\n\n# topics\ntopics:\n  - engenharia de software\n\n"
     c = c + "# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\ntarget: linkedin\n\n"
@@ -352,4 +363,211 @@ test "service: a fired occurrence runs the research pipeline and records the pau
     forceCleanup("svc-research")
     stopLm("svc-research")
     stopResearch("svc-research")
+}
+
+// Same as cliFixtures, plus a SHORT retry window so the retry is observable
+// inside a test (the default is 20 minutes).
+String cliFixturesRetry(String name, String rsPort, String lmPort, String args) {
+    var base = "http://127.0.0.1:" + rsPort
+    var cmd = "cd '" + workDir(name) + "' && KOF_PUBLISHER_HOME='" + workDir(name) + "/home'"
+        + " KOF_RESEARCH_HN_API='" + base + "/hn'"
+        + " KOF_RESEARCH_DEVTO_API='" + base + "/devto'"
+        + " KOF_RESEARCH_LOBSTERS_API='" + base + "/lobsters'"
+        + " KOF_RESEARCH_TIMEOUT=10"
+        + " KOF_PUBLISHER_RETRY_DELAY_MIN=1"
+        + " KOF_PUBLISHER_RETRY_MAX=2"
+        + " KOF_LM_URL=http://127.0.0.1:" + lmPort + " KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25"
+        + " timeout 60 java -cp '" + classpath() + "' Default.Main " + args + " 2>&1"
+    var r = process.run("sh", "-c", cmd)
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+// A slot that cannot post gets another attempt LATER THE SAME DAY, instead of
+// waiting for tomorrow. This is the "sempre haja postagem nos horarios" rule:
+// a skip (no candidate right now) or a factual-gate block is retried.
+test "service: a slot that did not post is retried later the same day" {
+    runCmd("for p in $(pgrep -f 'Default.Main daemo[n]'); do d=$(readlink /proc/$p/cwd 2>/dev/null); if [ \"$d\" = '" + workDir("svc-retry") + "' ]; then kill -9 $p 2>/dev/null || true; fi; done; true")
+    prepare("svc-retry")
+    File(workDir("svc-retry") + "/company.kofmd").writeText(autonomousCompany())
+    // "empty" = every source answers a well-formed but EMPTY list, so the news
+    // slot has no candidate and SKIPS deterministically.
+    startResearch("svc-retry", "11970", "empty")
+    startLm("svc-retry", "11971")
+
+    var sync = cliFixturesRetry("svc-retry", "11970", "11971", "sync --company company.kofmd --store pub.db")
+    assert(exitOf(sync) == 0, sync)
+    runCmd("python3 -c \"import sqlite3,datetime; tz=datetime.timezone(datetime.timedelta(hours=-3)); t=(datetime.datetime.now(tz)-datetime.timedelta(minutes=2)).strftime('%Y-%m-%dT%H:%M:%S-03:00'); c=sqlite3.connect('" + workDir("svc-retry") + "/pub.db'); c.execute(\\\"update schedule set next_execution=? where name='noon'\\\", (t,)); c.commit()\"")
+
+    var s = cliFixturesRetry("svc-retry", "11970", "11971", "start --company company.kofmd --store pub.db")
+    assert(exitOf(s) == 0, s)
+
+    var logPath = workDir("svc-retry") + "/home/publisher.log"
+    var waited = 0
+    var found = ""
+    while (waited < 90000) {
+        found = runCmd("grep -c 'nova tentativa em' '" + logPath + "' 2>/dev/null; true")
+        if (outOf(found).trim() != "0") {
+            break
+        }
+        runCmd("sleep 2")
+        waited = waited + 2000
+    }
+    var log = runCmd("cat '" + logPath + "' 2>/dev/null")
+    assert(has(outOf(log), "nova tentativa em"), "a retentativa nao foi agendada:\n" + outOf(log))
+
+    // The schedule's next_execution must now be a NEAR-FUTURE instant (the retry),
+    // not tomorrow's 12:00.
+    var soon = runCmd("python3 -c \"import sqlite3,datetime; c=sqlite3.connect('" + workDir("svc-retry") + "/pub.db'); nx=c.execute(\\\"select next_execution from schedule where name='noon'\\\").fetchone()[0]; tz=datetime.timezone(datetime.timedelta(hours=-3)); d=datetime.datetime.strptime(nx[:19],'%Y-%m-%dT%H:%M:%S').replace(tzinfo=tz); now=datetime.datetime.now(tz); delta=(d-now).total_seconds(); print('SOON' if 0 <= delta <= 300 else ('PAST' if delta < 0 else 'FAR'))\"")
+    assert(has(outOf(soon), "SOON"), "next_execution nao foi para a retentativa: " + outOf(soon))
+
+    var stop = cliFixturesRetry("svc-retry", "11970", "11971", "stop")
+    assert(exitOf(stop) == 0, stop)
+    forceCleanup("svc-retry")
+    stopLm("svc-retry")
+    stopResearch("svc-retry")
+}
+
+String cliFixturesPrep(String name, String rsPort, String lmPort, String args) {
+    var base = "http://127.0.0.1:" + rsPort
+    var cmd = "cd '" + workDir(name) + "' && KOF_PUBLISHER_HOME='" + workDir(name) + "/home'"
+        + " KOF_RESEARCH_HN_API='" + base + "/hn'"
+        + " KOF_RESEARCH_DEVTO_API='" + base + "/devto'"
+        + " KOF_RESEARCH_LOBSTERS_API='" + base + "/lobsters'"
+        + " KOF_RESEARCH_TIMEOUT=10"
+        + " KOF_PUBLISHER_PREP_LEAD_MIN=1"
+        + " KOF_LM_URL=http://127.0.0.1:" + lmPort + " KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25"
+        + " timeout 60 java -cp '" + classpath() + "' Default.Main " + args + " 2>&1"
+    var r = process.run("sh", "-c", cmd)
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+// PREPARE-AHEAD: o texto e gerado ANTES do horario e publicado na hora exata.
+test "service: a slot prepares ahead and publishes at the scheduled time" {
+    runCmd("for p in $(pgrep -f 'Default.Main daemo[n]'); do d=$(readlink /proc/$p/cwd 2>/dev/null); if [ \"$d\" = '" + workDir("svc-prep") + "' ]; then kill -9 $p 2>/dev/null || true; fi; done; true")
+    prepare("svc-prep")
+    File(workDir("svc-prep") + "/company.kofmd").writeText(autonomousCompany())
+    startResearch("svc-prep", "11990", "normal")
+    startLm("svc-prep", "11991")
+
+    var sync = cliFixturesPrep("svc-prep", "11990", "11991", "sync --company company.kofmd --store pub.db")
+    assert(exitOf(sync) == 0, sync)
+    // A ocorrencia precisa ser a do RELOGIO (HH:MM batendo com o clock da
+    // agenda): o adiantamento so vale para ela — uma retentativa, por cair a
+    // poucos minutos, nao e adiantada. Entao a agenda e movida para o proximo
+    // minuto cheio, ~40s a frente, e o PREP (lead de 1min) ja esta vencido
+    // enquanto a PUBLICACAO ainda nao — exatamente o que se quer medir.
+    runCmd("python3 -c \"import sqlite3,datetime; tz=datetime.timezone(datetime.timedelta(hours=-3)); now=datetime.datetime.now(tz); t=(now+datetime.timedelta(seconds=45)).replace(second=0,microsecond=0); t=t+datetime.timedelta(minutes=1) if (t-now).total_seconds()<20 else t; iso=t.strftime('%Y-%m-%dT%H:%M:%S-03:00'); clk=t.strftime('%H:%M'); c=sqlite3.connect('" + workDir("svc-prep") + "/pub.db'); c.execute(\\\"update schedule set next_execution=?, clock=? where name='noon'\\\", (iso,clk)); c.commit()\"")
+
+    var s = cliFixturesPrep("svc-prep", "11990", "11991", "start --company company.kofmd --store pub.db")
+    assert(exitOf(s) == 0, s)
+
+    var logPath = workDir("svc-prep") + "/home/publisher.log"
+    var waited = 0
+    var found = ""
+    while (waited < 60000) {
+        found = runCmd("grep -c 'texto pronto' '" + logPath + "' 2>/dev/null; true")
+        if (outOf(found).trim() != "0") {
+            break
+        }
+        runCmd("sleep 2")
+        waited = waited + 2000
+    }
+    var log = runCmd("cat '" + logPath + "' 2>/dev/null")
+    assert(has(outOf(log), "texto pronto"), "nao preparou com antecedencia:\n" + outOf(log))
+
+    // O rascunho esta AGENDADO (nao publicado) — gerado antes, esperando a hora.
+    var st = runCmd("python3 -c \"import sqlite3; c=sqlite3.connect('" + workDir("svc-prep") + "/pub.db'); print(c.execute(\\\"select status from publication\\\").fetchone()[0])\"")
+    assert(has(outOf(st), "scheduled"), "o rascunho nao ficou agendado: " + outOf(st))
+
+    // Ao chegar o horario, o passe de agendados publica.
+    var waited2 = 0
+    var pub = ""
+    while (waited2 < 90000) {
+        pub = runCmd("python3 -c \"import sqlite3; c=sqlite3.connect('" + workDir("svc-prep") + "/pub.db'); r=c.execute(\\\"select status from publication\\\").fetchone(); print(r[0] if r else '')\"")
+        if (has(outOf(pub), "published")) {
+            break
+        }
+        runCmd("sleep 3")
+        waited2 = waited2 + 3000
+    }
+    assert(has(outOf(pub), "published"), "nao publicou na hora agendada: " + outOf(pub) + "\n" + runCmd("tail -6 '" + logPath + "'"))
+
+    var stop = cliFixturesPrep("svc-prep", "11990", "11991", "stop")
+    assert(exitOf(stop) == 0, stop)
+    forceCleanup("svc-prep")
+    stopLm("svc-prep")
+    stopResearch("svc-prep")
+}
+
+String cliFixturesFault(String name, String rsPort, String lmPort, String args) {
+    var base = "http://127.0.0.1:" + rsPort
+    var cmd = "cd '" + workDir(name) + "' && KOF_PUBLISHER_HOME='" + workDir(name) + "/home'"
+        + " KOF_RESEARCH_HN_API='" + base + "/hn'"
+        + " KOF_RESEARCH_DEVTO_API='" + base + "/devto'"
+        + " KOF_RESEARCH_LOBSTERS_API='" + base + "/lobsters'"
+        + " KOF_RESEARCH_TIMEOUT=10"
+        + " KOF_LM_URL=http://127.0.0.1:" + lmPort + " KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=5"
+        + " timeout 60 java -cp '" + classpath() + "' Default.Main " + args + " 2>&1"
+    var r = process.run("sh", "-c", cmd)
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+// REGRESSÃO 2026-11-02: o daemon MORREU às 11:54 no meio do dia.
+//
+// O LM estourou o timeout e a excecao chegou como algo que nao e String. O
+// catch da geracao so tratava String, entao a excecao subiu ate o main, que
+// imprimiu "publisher: error" e encerrou o PROCESSO — os slots das 15:00 e
+// 18:00 nunca rodaram. Aqui o modelo sempre falha (timeout de verdade, a
+// fixture dorme mais que o deadline e fecha), e o que se mede e o essencial:
+// a ocorrencia se resolve sozinha e o daemon continua VIVO.
+test "service: an LM failure skips the slot and never kills the daemon" {
+    runCmd("for p in $(pgrep -f 'Default.Main daemo[n]'); do d=$(readlink /proc/$p/cwd 2>/dev/null); if [ \"$d\" = '" + workDir("svc-lmdown") + "' ]; then kill -9 $p 2>/dev/null || true; fi; done; true")
+    prepare("svc-lmdown")
+    File(workDir("svc-lmdown") + "/company.kofmd").writeText(autonomousCompany())
+    startResearch("svc-lmdown", "11972", "normal")
+    runCmd("pkill -f 'fake_lm_serv[e]r.py 11973' || true; true")
+    var up = runCmd("{ python3 '" + publisherDir() + "/tests/fake_lm_server.py' 11973 timeout > '" + workDir("svc-lmdown") + "/lm.log' 2>&1 & echo $! > '" + workDir("svc-lmdown") + "/lm.pid'; }; sleep 1; curl -s -m 4 http://127.0.0.1:11973/api/tags | grep -c models")
+    assert(exitOf(up) == 0 && outOf(up).trim() == "1", up)
+
+    var sync = cliFixturesFault("svc-lmdown", "11972", "11973", "sync --company company.kofmd --store pub.db")
+    assert(exitOf(sync) == 0, sync)
+    // Agenda de RELÓGIO (HH:MM == clock): o adiantamento gera agora e prepara
+    // a ocorrencia sem esperar a hora; sem isso o teste dormiria ate o
+    // horario real.
+    runCmd("python3 -c \"import sqlite3,datetime; tz=datetime.timezone(datetime.timedelta(hours=-3)); now=datetime.datetime.now(tz); t=(now+datetime.timedelta(minutes=2)).replace(second=0,microsecond=0); t=t+datetime.timedelta(minutes=1) if (t-now).total_seconds()<100 else t; iso=t.strftime('%Y-%m-%dT%H:%M:%S-03:00'); clk=t.strftime('%H:%M'); c=sqlite3.connect('" + workDir("svc-lmdown") + "/pub.db'); c.execute(\\\"update schedule set next_execution=?, clock=? where name='noon'\\\", (iso,clk)); c.commit()\"")
+
+    var s = cliFixturesFault("svc-lmdown", "11972", "11973", "start --company company.kofmd --store pub.db")
+    assert(exitOf(s) == 0, s)
+
+    var logPath = workDir("svc-lmdown") + "/home/publisher.log"
+    var waited = 0
+    var seen = ""
+    while (waited < 150000) {
+        seen = runCmd("grep -c 'request failed\\|no response from' '" + logPath + "' 2>/dev/null; true")
+        if (outOf(seen).trim() != "0") {
+            break
+        }
+        runCmd("sleep 2")
+        waited = waited + 2000
+    }
+    var log = runCmd("cat '" + logPath + "' 2>/dev/null")
+    // A falha do modelo vira SKIP com a causa honesta (nunca lixo JSON no texto).
+    assert(has(outOf(log), "request failed") || has(outOf(log), "no response from"), "a falha do LM nao foi tratada:\n" + outOf(log))
+    assert(!has(outOf(log), "publisher: error"), "a excecao escapou ate o main (o processo morreu):\n" + outOf(log))
+
+    // O daemon continua de pe depois do erro (heartbeat novo e pid vivo).
+    var alive = runCmd("sleep 3; cat '" + workDir("svc-lmdown") + "/home/publisher.pid'")
+    var pid = outOf(alive).trim()
+    var running = runCmd("kill -0 '" + pid + "' && echo VIVO || echo MORTO")
+    assert(has(outOf(running), "VIVO"), "o daemon morreu apos a falha do LM:\n" + outOf(log))
+
+    // E a ocorrencia ficou registrada como ignorada (retentavel), nao presa.
+    var st = runCmd("python3 -c \"import sqlite3; c=sqlite3.connect('" + workDir("svc-lmdown") + "/pub.db'); print(c.execute(\\\"select result from occurrence\\\").fetchone()[0])\"")
+    assert(has(outOf(st), "skipped"), "a ocorrencia nao foi registrada como skipped: " + outOf(st))
+
+    var stop = cliFixturesFault("svc-lmdown", "11972", "11973", "stop")
+    assert(exitOf(stop) == 0, stop)
+    forceCleanup("svc-lmdown")
+    runCmd("kill $(cat '" + workDir("svc-lmdown") + "/lm.pid') 2>/dev/null || true")
+    stopResearch("svc-lmdown")
 }

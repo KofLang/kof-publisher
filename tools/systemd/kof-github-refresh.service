@@ -1,0 +1,13 @@
+[Unit]
+Description=KOF publisher - atualiza a base de conhecimento dos repositorios (GitHub)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Ajuste os caminhos para o checkout de quem usa (%h = home do usuario)
+WorkingDirectory=%h/Documentos/kof-publisher
+ExecStart=%h/Documentos/kof-publisher/tools/github-refresh.sh
+# O script ja busca o token em ~/.local/share/kof/github-secrets.env (ou no
+# `gh auth token`). Para apontar outro arquivo, descomente:
+# EnvironmentFile=%h/.config/kof-publisher/env

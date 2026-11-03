@@ -1,0 +1,237 @@
+
+// Mirror — share the author's OWN enois posts on LinkedIn.
+//
+// This REPLACES the scheduled editorial pipeline as the source of posts. The
+// old model picked a third-party item and wrote an opinion about it; the new
+// model reads what the author actually wrote on her enois profile and mirrors
+// it: the post's public link goes to LinkedIn with a caption written from the
+// post's own text.
+//
+// Three rules shape the flow:
+//
+//  1. THE FIRST RUN ESTABLISHES A BASELINE, it does not publish. On a fresh
+//     ledger every existing post would look "new" and the author's LinkedIn
+//     would receive a burst of shares of old posts. The first poll records the
+//     current posts as seen WITHOUT sharing, so only posts written after the
+//     mirror was switched on are shared. (`publisher.enois.backfill=true`
+//     overrides this deliberately.)
+//  2. NOTHING IS INVENTED. The caption is written from the post's text and the
+//     post is the source. A post with no readable text is SKIPPED and recorded
+//     as such — never captioned from imagination.
+//  3. OLDEST FIRST. Posts are shared in chronological order, so a poll that
+//     finds more than one new post does not publish them out of order.
+
+// Free-function timestamp (Scheduler.nowStamp is a METHOD of that class and
+// cannot be called from here).
+String mirrorStamp(String zone) {
+    var sp = localOf(zone, time.now())
+    if (sp == null) {
+        return ""
+    }
+    return isoOf(sp)
+}
+
+record MirrorReport(Int listed, Int fresh, Int shared, Int skipped, Int failed, Bool baseline, List<String> lines)
+
+Int mirrorMinCharsInt() {
+    return config.int("publisher.enois.min.chars", 40)
+}
+
+Int mirrorListLimit() {
+    return config.int("publisher.enois.limit", 20)
+}
+
+Int mirrorMaxPerPoll() {
+    return config.int("publisher.enois.max.per.poll", 2)
+}
+
+// ---- caption ----
+
+String mirrorSystem(Company company) {
+    var s = "Voce escreve a legenda que acompanha o LINK de um post no LinkedIn da " + company.name() + "."
+    s = s + " O post e dela mesma, publicado no enois (uma rede profissional), e a legenda vai junto com o link para esse post."
+    s = s + "\n\nRegras:"
+    s = s + "\n- Primeira pessoa, na voz dela."
+    s = s + "\n- Baseie-se SOMENTE no texto do post. Nao invente fatos, numeros, resultados, nomes ou opinioes que o post nao diga."
+    s = s + "\n- Nao escreva o link nem a URL: o LinkedIn monta o cartao sozinho."
+    s = s + "\n- Separe os paragrafos com UMA LINHA EM BRANCO."
+    s = s + "\n- De 2 a 4 paragrafos curtos."
+    s = s + "\n- No maximo 3 hashtags, e so se fizerem sentido."
+    s = s + "\n- Nunca use travessao (—)."
+    s = s + "\n- Nao comece com 'Estou animado' nem 'Que orgulho'."
+    if (company.tone() != "") {
+        s = s + "\n- Tom: " + company.tone() + "."
+    }
+    return s
+}
+
+String mirrorPrompt(String postText) {
+    return "Texto do post dela no enois:\n\n" + postText + "\n\nEscreva a legenda do LinkedIn para esse post."
+}
+
+// "" when the model failed or produced nothing usable — the caller treats that
+// as "no caption", never as "publish something anyway".
+String mirrorCaption(Company company, String postText) {
+    var r = lmComplete(mirrorSystem(company), mirrorPrompt(postText))
+    if (!r.ok()) {
+        return ""
+    }
+    var c = cleanDraft(r.text())
+    if (c.trim() == "") {
+        return ""
+    }
+    // The Kof rule is enforced in code for every post the publisher writes, and
+    // a share caption is no exception: if the post is about Kof, the caption
+    // ends with the battle cry and the project link.
+    return ensureKofSignature(c)
+}
+
+// ---- the poll ----
+
+MirrorReport mirrorPoll(Store store, Company company, Bool dry) {
+    var lines = listOf<String>()
+    var posts = enoisListPosts(mirrorListLimit())
+    if (posts.size() == 0) {
+        lines.add("nenhum post lido do enois (perfil vazio, rede fora do ar ou credencial ausente) — nada a fazer")
+        return MirrorReport(0, 0, 0, 0, 0, false, lines)
+    }
+    var known = store.allEnoisSeen()
+    // Baseline: a fresh ledger must NOT dump the whole back catalogue on
+    // LinkedIn. Record everything as seen and share nothing this once.
+    var baseline = known.size() == 0 && config.str("publisher.enois.backfill", "false") != "true"
+    var targetName = firstNonEmpty(company.publishingTarget(), "linkedin")
+    // The target is resolved PER POST, only when something is actually going
+    // to be published: a dry run must not touch it (resolving reads the
+    // LinkedIn credentials, so `--dry` on a box without them would fail before
+    // showing anything — the opposite of what a dry run is for).
+    var shared = 0
+    var skipped = 0
+    var failed = 0
+    var fresh = 0
+    var publishedNow = 0
+    // oldest -> newest
+    var i = posts.size() - 1
+    while (i >= 0) {
+        var p = posts.get(i)
+        i = i - 1
+        var prev = store.enoisSeenById(p.id())
+        if (prev != null) {
+            var st = prev.status()
+            // Only "shared" (already on LinkedIn) and "baseline" (existed before
+            // the mirror was switched on) are terminal. A post whose caption the
+            // model failed to produce, or whose share the target refused, MUST be
+            // retried on the next poll — skipping it forever would silently drop
+            // a post because of one transient failure (measured 2026-10-17: the
+            // model returned nothing once and the post was gone for good).
+            // "unusable" is TERMINAL: a post that carries no readable text will
+            // never carry it later, and retrying it every poll spun the log and
+            // the model forever (measured 2026-10-19: four short posts retried
+            // every 10 minutes for days). "skipped"/"failed" stay retryable
+            // because those are transient.
+            if (st == "shared" || st == "baseline" || st == "unusable") {
+                continue
+            }
+        }
+        fresh = fresh + 1
+        if (baseline) {
+            store.saveEnoisSeen(EnoisSeen(p.id(), p.createdAt(), mirrorStamp(company.timezone()), "baseline", "", enoisPostUrl(p.id()), "linha de base: post anterior a ligacao do espelho"))
+            continue
+        }
+        var text = enoisPostText(p)
+        if (text.length < mirrorMinCharsInt()) {
+            store.saveEnoisSeen(EnoisSeen(p.id(), p.createdAt(), mirrorStamp(company.timezone()), "skipped", "", enoisPostUrl(p.id()), "post sem texto legivel (" + text.length + " caracteres) — nada honesto a legendar"))
+            skipped = skipped + 1
+            lines.add("SKIP  " + p.id() + " (" + p.type() + ", " + text.length + " car.): sem texto legivel")
+            continue
+        }
+        if (publishedNow >= mirrorMaxPerPoll()) {
+            lines.add("ADIADO " + p.id() + ": limite de " + mirrorMaxPerPoll() + " compartilhamento(s) por ciclo (sai no proximo)")
+            continue
+        }
+        var caption = mirrorCaption(company, text)
+        if (caption == "") {
+            store.saveEnoisSeen(EnoisSeen(p.id(), p.createdAt(), mirrorStamp(company.timezone()), "skipped", "", enoisPostUrl(p.id()), "o modelo nao produziu legenda — nada publicado"))
+            skipped = skipped + 1
+            lines.add("SKIP  " + p.id() + ": o modelo nao produziu legenda")
+            continue
+        }
+        var url = enoisPostUrl(p.id())
+        var title = mirrorTitleOf(text)
+        var pubId = "pub-enois-" + p.id()
+        if (dry) {
+            lines.add("DRY   " + url + " (" + caption.length + " car. de legenda)")
+            lines.add("      legenda: " + strings.truncate(caption, 200))
+            publishedNow = publishedNow + 1
+            continue
+        }
+        var resolved = resolveTarget(targetName)
+        if (resolved == null) {
+            store.saveEnoisSeen(EnoisSeen(p.id(), p.createdAt(), mirrorStamp(company.timezone()), "failed", "", url, "destino desconhecido: " + targetName))
+            failed = failed + 1
+            lines.add("FALHA " + p.id() + ": destino desconhecido (" + targetName + ")")
+            continue
+        }
+        var t = resolved
+        try {
+            var outcome = t.publishLink(caption, url, title, "")
+            store.savePublication(Publication(pubId, company.name(), title, caption, statusPublished(), mirrorStamp(company.timezone()), "", mirrorStamp(company.timezone()), targetName, lmModel(), company.digest(), "", outcome.externalId(), "", "enois@" + p.id(), 1, ""))
+            store.saveEnoisSeen(EnoisSeen(p.id(), p.createdAt(), mirrorStamp(company.timezone()), "shared", pubId, url, ""))
+            shared = shared + 1
+            publishedNow = publishedNow + 1
+            lines.add("OK    " + url + " -> " + outcome.externalId())
+        } catch (String e) {
+            store.saveEnoisSeen(EnoisSeen(p.id(), p.createdAt(), mirrorStamp(company.timezone()), "failed", "", url, strings.truncate(secrets.redact(e), 300)))
+            failed = failed + 1
+            lines.add("FALHA " + url + ": " + secrets.redact(e))
+        } catch (Exception e) {
+            store.saveEnoisSeen(EnoisSeen(p.id(), p.createdAt(), mirrorStamp(company.timezone()), "failed", "", url, strings.truncate(secrets.redact(e.toString()), 300)))
+            failed = failed + 1
+            lines.add("FALHA " + url + ": " + secrets.redact(e.toString()))
+        }
+    }
+    if (baseline) {
+        lines.add("LINHA DE BASE: " + fresh + " post(s) existente(s) registrado(s) como vistos; nada foi compartilhado.")
+        lines.add("A partir de agora, so post novo no enois vira compartilhamento no LinkedIn.")
+    }
+    return MirrorReport(posts.size(), fresh, shared, skipped, failed, baseline, lines)
+}
+
+// A short title for the link card: the post's first sentence, trimmed. The
+// enois post has no title field, so this is the honest stand-in — and it comes
+// from the post's own words, not from imagination.
+String mirrorTitleOf(String text) {
+    var cut = text.length
+    var i = 0
+    while (i < text.length) {
+        var c = text.charAt(i)
+        if (c == 46 || c == 10 || c == 33 || c == 63) {
+            cut = i
+            i = text.length
+        } else {
+            i = i + 1
+        }
+    }
+    var t = text.substring(0, cut).trim()
+    if (t == "") {
+        t = text.trim()
+    }
+    return strings.truncate(t, 120)
+}
+
+// ---- tests (pure) ----
+
+test "mirror: the card title comes from the post's own first sentence" {
+    assert(mirrorTitleOf("Primeira frase. Segunda frase.") == "Primeira frase", mirrorTitleOf("Primeira frase. Segunda frase."))
+    assert(mirrorTitleOf("Sem pontuacao alguma") == "Sem pontuacao alguma")
+    assert(mirrorTitleOf("  com espaco  ") == "com espaco")
+}
+
+test "mirror: a long post is trimmed for the card" {
+    var many = ""
+    var i = 0
+    while (i < 40) {
+        many = many + "palavra "
+        i = i + 1
+    }
+    assert(mirrorTitleOf(many).length <= 120, "" + mirrorTitleOf(many).length)
+}

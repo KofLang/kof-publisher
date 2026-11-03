@@ -46,7 +46,12 @@ record ResearchOutcome(Bool ok, List<ResearchItem> items, String error, String d
 
 // ---- JSON shapes of the sources ----
 
-record HnHit(String title, String url, String created_at, Int points, String objectID)
+// `story_text` is the body of a text post (Ask HN, Show HN with context). The
+// client used to ignore it and keep only the score line ("212 pontos na front
+// page"), which is metadata ABOUT the item, not content from it — and a news
+// post needs content. Using the body when the source provides one is the
+// difference between a post that can say something and a translated headline.
+record HnHit(String title, String url, String created_at, Int points, String objectID, String story_text)
 record HnResp(List<HnHit> hits)
 
 record DevArticle(String title, String url, String published_at, String description, Int positive_reactions_count)
@@ -81,6 +86,35 @@ Int researchTimeout() {
 
 Int researchMaxItems() {
     return config.int("research.max.items", 40)
+}
+
+// PRIMARY sources declared as RSS/Atom feeds in the profile's `# editorial`
+// section under `research_feeds:`. The hand-rolled RSS reader already existed
+// but NOTHING wired it, so an official release feed or changelog could not be
+// consulted even when the author declared one — the pipeline only ever saw the
+// three aggregators. Feeds are the primary-source path the spec asks for
+// (releases, changelogs, official docs), and each is fetched with its own
+// honest failure report.
+//
+// The env override (KOF_RESEARCH_FEEDS, comma-separated) is the test hook.
+List<String> researchFeedUrls(Company company) {
+    var env = config.env("KOF_RESEARCH_FEEDS")
+    if (env != null && env.trim() != "") {
+        var out = listOf<String>()
+        for (var u in env.split(",")) {
+            if (u.trim() != "") {
+                out.add(u.trim())
+            }
+        }
+        return out
+    }
+    var out2 = listOf<String>()
+    for (var u in company.researchFeeds()) {
+        if (u.trim() != "") {
+            out2.add(u.trim())
+        }
+    }
+    return out2
 }
 
 // ISO-8601 stamp with the profile's explicit offset — same convention as the
@@ -124,6 +158,34 @@ ResearchResp researchGet(String url, String accept) {
         return ResearchResp(false, "", "research: resposta vazia (" + url + ")")
     }
     return ResearchResp(true, raw, "")
+}
+
+// How much of an item was actually OBTAINED (spec §3). This is the honest
+// answer to "fonte encontrada / metadados consultados / resumo consultado /
+// conteudo lido": the publisher never reads an article body, so the ceiling
+// here is a summary, and most aggregator items are below even that.
+//
+//   titulo      only the headline came back (no description field at all)
+//   metadados   headline + url + dates + a score; no prose about the item
+//   resumo      the source published a description/blurb that was read
+//
+// The distinction matters because a title can ground "this exists and says X";
+// it cannot ground a claim about how the thing works.
+String researchExtent(String summary, String sourceType) {
+    var s = summary.trim()
+    if (s == "") {
+        return "titulo"
+    }
+    // An aggregator's own counter ("506 pontos na front page", "120 pontos, 40
+    // comentarios") is metadata ABOUT the item, not content from it. It is
+    // recognisable: it is short and dominated by a number and a unit.
+    if (sourceType == "agregador") {
+        var low = s.toLowerCase()
+        if (low.indexOf("pontos") >= 0 || low.indexOf("comentarios") >= 0) {
+            return "metadados"
+        }
+    }
+    return "resumo"
 }
 
 // ---- item construction ----
@@ -228,7 +290,15 @@ ResearchOutcome researchHn(String tz, String query) {
             if (t == null || t == "") {
                 continue
             }
-            out.add(researchItem(t, link, "Hacker News", h.created_at(), stamp, "" + h.points() + " pontos na front page", "agregador", h.points()))
+            // Prefer the post body when the source published one; the score
+            // line is the fallback, and it is only metadata.
+            var summary = ""
+            if (h.story_text() != null && h.story_text().trim() != "") {
+                summary = h.story_text()
+            } else {
+                summary = "" + h.points() + " pontos na front page"
+            }
+            out.add(researchItem(t, link, "Hacker News", h.created_at(), stamp, summary, "agregador", h.points()))
         }
         return ResearchOutcome(true, out, "", "hackernews: " + out.size() + " item(ns)")
     } catch (String e) {

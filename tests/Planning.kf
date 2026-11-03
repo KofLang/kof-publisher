@@ -389,7 +389,7 @@ test "plan: a news post may not assert a property the source never stated" {
     // same fixture text and muddy which check fired.
     var company = "# company\nname: Propriedade\n\n# topics\ntopics:\n  - engenharia de software\n\n# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\ntarget: linkedin\n\n# editorial\nrequire_material: true\nresearch:\n  - hackernews\nresearch_max_age_hours: 168\n\n# category noon\nclock: 12:00\nlabel: noticia de tecnologia\nfunction: noticias\nangle: noticia recente\n"
     File(workDir("pl-prop") + "/company.kofmd").writeText(company)
-    startResearch("pl-prop", "11980", "normal")
+    startResearch("pl-prop", "11980", "substance")
     startLmMode("pl-prop", "11981", "localclaim")
 
     var p = cliPlan("pl-prop", "11980", "11981", "plan --company company.kofmd --store pub.db")
@@ -416,7 +416,7 @@ test "plan: a news post may not narrate the author's day around the item" {
     prepare("pl-newsep")
     var company = "# company\nname: EpisodioNoticia\n\n# topics\ntopics:\n  - engenharia de software\n\n# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\ntarget: linkedin\n\n# editorial\nrequire_material: true\nresearch:\n  - hackernews\nresearch_max_age_hours: 168\n\n# category noon\nclock: 12:00\nlabel: noticia de tecnologia\nfunction: noticias\nangle: noticia recente\n"
     File(workDir("pl-newsep") + "/company.kofmd").writeText(company)
-    startResearch("pl-newsep", "11982", "normal")
+    startResearch("pl-newsep", "11982", "substance")
     startLmMode("pl-newsep", "11983", "newsepisode")
 
     // The episode check used to run only for profile/repo pautas, so a news

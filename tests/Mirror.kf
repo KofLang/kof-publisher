@@ -1,0 +1,207 @@
+// E2E: the enois mirror — the author's own profile as the source of truth.
+//
+// Runs the REAL built binary against a CONTROLLED enois API (tests/fake_enois.py)
+// and a dryrun target, in an isolated home, so no test ever touches the real
+// enois or LinkedIn.
+//
+// Proven here:
+//   the FIRST run only records a baseline — it must not dump the back catalogue
+//   on LinkedIn;
+//   a genuinely new post becomes a link share whose caption came from the post;
+//   the same post is never shared twice;
+//   a post with no readable text is SKIPPED, never captioned from imagination;
+//   a PAGE post (text only in pageHtml) is read through the detail endpoint.
+
+String envOr(String key, String dflt) {
+    var v = config.env(key)
+    if (v != null && v != "") {
+        return v
+    }
+    return dflt
+}
+
+String publisherDir() {
+    return envOr("KOF_PUBLISHER_DIR", "/home/mel/Documentos/kof-publisher")
+}
+
+String classpath() {
+    var home = envOr("HOME", "/home/mel")
+    var drv = envOr("KOF_SQLITE_JAR", home + "/.kof/deps/org/xerial/sqlite-jdbc/3.53.4.0/sqlite-jdbc-3.53.4.0.jar")
+    return envOr("KOF_PUBLISHER_CLASSES", publisherDir() + "/build/classes")
+        + ":" + home + "/.local/share/kof/lib/kof.jar:" + drv
+}
+
+String workDir(String name) {
+    return "/tmp/kof-pub-tests/" + name
+}
+
+String runCmd(String cmd) {
+    var r = process.run("sh", "-c", cmd + " 2>&1")
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+Int exitOf(String blob) {
+    var i = blob.indexOf("||EXIT=")
+    if (i < 0) {
+        throw "no exit marker"
+    }
+    return blob.substring(i + 7).toInt()
+}
+
+String outOf(String blob) {
+    var i = blob.indexOf("||EXIT=")
+    return blob.substring(0, i)
+}
+
+Bool has(String hay, String needle) {
+    return hay.indexOf(needle) >= 0
+}
+
+// A profile whose target is dryrun: the mirror publishes into a directory, so
+// the test OBSERVES the share instead of hitting the real LinkedIn.
+String mirrorCompany() {
+    var c = "# company\nname: Mirror Test\n\n"
+    c = c + "# topics\ntopics:\n  - engenharia de software\n\n"
+    c = c + "# publishing\ntimezone: America/Sao_Paulo\nmode: autonomous\ntarget: dryrun\n\n"
+    c = c + "# editorial\nrequire_material: true\n"
+    return c
+}
+
+String mirrorEnv(String name, String rsPort, String lmPort, String args) {
+    var dir = workDir(name)
+    var base = "http://127.0.0.1:" + rsPort
+    var cmd = "cd '" + dir + "' && KOF_PUBLISHER_HOME='" + dir + "/home'"
+        + " KOF_ENOIS_SITE='" + base + "'"
+        + " KOF_ENOIS_API='" + base + "/api'"
+        + " KOF_ENOIS_USERNAME=aminadojava"
+        + " KOF_PUBLISHER_DRYRUN_DIR='" + dir + "/dryrun'"
+        + " KOF_LM_URL=http://127.0.0.1:" + lmPort + " KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25"
+        + " timeout 90 java -cp '" + classpath() + "' Default.Main " + args + " 2>&1"
+    var r = process.run("sh", "-c", cmd)
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+Int startEnois(String name, String port, String mode) {
+    var dir = workDir(name)
+    var cmd = "mkdir -p '" + dir + "/home' && (setsid python3 " + publisherDir() + "/tests/fake_enois.py " + port + " " + mode
+        + " > '" + dir + "/enois.log' 2>&1 < /dev/null &) ; sleep 2; curl -s -m 3 http://127.0.0.1:" + port + "/__health"
+    runCmd(cmd)
+    return 0
+}
+
+Int stopEnois(String port) {
+    runCmd("pkill -f 'fake_enois.py " + port + "' 2>/dev/null; true")
+    return 0
+}
+
+Int startLm(String name, String port) {
+    var dir = workDir(name)
+    runCmd("(setsid python3 " + publisherDir() + "/tests/fake_lm_personal.py " + port + " distinct > '" + dir + "/lm.log' 2>&1 < /dev/null &) ; sleep 2; true")
+    return 0
+}
+
+Int stopLm(String port) {
+    runCmd("pkill -f 'fake_lm_personal.py " + port + "' 2>/dev/null; true")
+    return 0
+}
+
+Int prepare(String name) {
+    runCmd("rm -rf '" + workDir(name) + "' && mkdir -p '" + workDir(name) + "/home'")
+    return 0
+}
+
+test "mirror: the first run only records a baseline, it does not publish" {
+    prepare("mir-baseline")
+    File(workDir("mir-baseline") + "/company.kofmd").writeText(mirrorCompany())
+    startEnois("mir-baseline", "12350", "normal")
+    startLm("mir-baseline", "12351")
+
+    var r = mirrorEnv("mir-baseline", "12350", "12351", "mirror --company company.kofmd --store pub.db")
+    var out = outOf(r)
+    assert(exitOf(r) == 0, out)
+    // the three fixture posts are recorded as seen, NOTHING is shared
+    assert(has(out, "LINHA DE BASE"), out)
+    assert(has(out, "posts lidos : 3"), out)
+    assert(has(out, "compartilh. : 0"), out)
+    var files = runCmd("ls '" + workDir("mir-baseline") + "/dryrun' 2>/dev/null | wc -l")
+    assert(outOf(files).trim() == "0", "nada deveria ter sido publicado: " + outOf(files))
+    stopLm("12351")
+    stopEnois("12350")
+}
+
+test "mirror: a new post becomes a link share with a caption from the post" {
+    prepare("mir-new")
+    File(workDir("mir-new") + "/company.kofmd").writeText(mirrorCompany())
+    startEnois("mir-new", "12360", "normal")
+    startLm("mir-new", "12361")
+
+    var base = mirrorEnv("mir-new", "12360", "12361", "mirror --company company.kofmd --store pub.db")
+    assert(has(outOf(base), "LINHA DE BASE"), outOf(base))
+
+    // a genuinely NEW post appears on the profile
+    runCmd("curl -s -m 5 -X POST -H 'Content-Type: application/json' -d '{\"id\":\"post_brand_new\",\"type\":\"INSIGHT\",\"content\":\"Lancei uma feature nova no perfil: agora da pra customizar as cores do app inteiro e eu passei a tarde ajustando o tema escuro ate ficar do jeito que eu queria.\"}' http://127.0.0.1:12360/__add")
+
+    var r = mirrorEnv("mir-new", "12360", "12361", "mirror --company company.kofmd --store pub.db")
+    var out = outOf(r)
+    assert(exitOf(r) == 0, out)
+    assert(has(out, "novos       : 1"), out)
+    assert(has(out, "compartilh. : 1"), out)
+    assert(has(out, "OK    http://127.0.0.1:12360/post/post_brand_new"), out)
+
+    // the share landed as a file carrying the LINK and a caption
+    var f = runCmd("cat '" + workDir("mir-new") + "/dryrun/'*.md 2>/dev/null")
+    assert(has(outOf(f), "http://127.0.0.1:12360/post/post_brand_new"), "o link nao foi compartilhado:\n" + outOf(f))
+    var lines = runCmd("head -1 '" + workDir("mir-new") + "/dryrun/'*.md 2>/dev/null")
+    assert(outOf(lines).trim().length > 20, "a legenda saiu vazia:\n" + outOf(lines))
+
+    // running again shares NOTHING: the post is already in the ledger
+    var again = mirrorEnv("mir-new", "12360", "12361", "mirror --company company.kofmd --store pub.db")
+    assert(has(outOf(again), "novos       : 0"), outOf(again))
+    assert(has(outOf(again), "compartilh. : 0"), outOf(again))
+    stopLm("12361")
+    stopEnois("12360")
+}
+
+test "mirror: a post with no readable text is skipped, never captioned" {
+    prepare("mir-short")
+    File(workDir("mir-short") + "/company.kofmd").writeText(mirrorCompany())
+    startEnois("mir-short", "12370", "normal")
+    startLm("mir-short", "12371")
+
+    var base = mirrorEnv("mir-short", "12370", "12371", "mirror --company company.kofmd --store pub.db")
+    assert(has(outOf(base), "LINHA DE BASE"), outOf(base))
+
+    // "Java" — 4 characters, nothing honest to caption
+    runCmd("curl -s -m 5 -X POST -H 'Content-Type: application/json' -d '{\"id\":\"post_tiny\",\"type\":\"INSIGHT\",\"content\":\"Java\"}' http://127.0.0.1:12370/__add")
+
+    var r = mirrorEnv("mir-short", "12370", "12371", "mirror --company company.kofmd --store pub.db")
+    var out = outOf(r)
+    assert(has(out, "ignorados   : 1"), out)
+    assert(has(out, "compartilh. : 0"), out)
+    assert(has(out, "sem texto legivel"), out)
+    var files = runCmd("ls '" + workDir("mir-short") + "/dryrun' 2>/dev/null | wc -l")
+    assert(outOf(files).trim() == "0", "nada deveria ter sido publicado: " + outOf(files))
+    stopLm("12371")
+    stopEnois("12370")
+}
+
+test "mirror: a PAGE post is read through the detail endpoint" {
+    prepare("mir-page")
+    File(workDir("mir-page") + "/company.kofmd").writeText(mirrorCompany())
+    startEnois("mir-page", "12380", "normal")
+    startLm("mir-page", "12381")
+
+    var base = mirrorEnv("mir-page", "12380", "12381", "mirror --company company.kofmd --store pub.db")
+    assert(has(outOf(base), "LINHA DE BASE"), outOf(base))
+
+    // a PAGE post carries its text ONLY in pageHtml, which the list endpoint
+    // does not return — the client has to fetch the detail
+    runCmd("curl -s -m 5 -X POST -H 'Content-Type: application/json' -d '{\"id\":\"post_page_new\",\"type\":\"PAGE\",\"pageHtml\":\"<div><p>Escrevi sobre como eu organizo o trabalho de um time pequeno sem transformar tudo em reuniao.</p></div>\"}' http://127.0.0.1:12380/__add")
+
+    var r = mirrorEnv("mir-page", "12380", "12381", "mirror --company company.kofmd --store pub.db")
+    var out = outOf(r)
+    assert(has(out, "compartilh. : 1"), out)
+    assert(has(out, "OK    http://127.0.0.1:12380/post/post_page_new"), out)
+    stopLm("12381")
+    stopEnois("12380")
+}

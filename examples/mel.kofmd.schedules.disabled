@@ -1,0 +1,35 @@
+# Referencia HISTORICA. Os blocos `# schedule` abaixo foram desligados em
+# 2026-10-17 (o espelho do enois virou o gatilho) e RESTAURADOS em 2026-11-01
+# no proprio examples/mel.kofmd. Este arquivo NAO e lido pelo publisher; ele
+# serve de modelo caso o modo volte a ser o espelho: e so apagar os blocos
+# `# schedule` do perfil, cancelar as agendas
+# (`publisher cancel morning|noon|afternoon|evening`) e subir o daemon com
+# KOF_ENOIS_POLL_MIN=10.
+
+# schedule morning
+
+every: 1
+at: 06:00
+mode: autonomous
+target: linkedin
+
+# schedule noon
+
+every: 1
+at: 12:00
+mode: autonomous
+target: linkedin
+
+# schedule afternoon
+
+every: 1
+at: 15:00
+mode: autonomous
+target: linkedin
+
+# schedule evening
+
+every: 1
+at: 18:00
+mode: autonomous
+target: linkedin

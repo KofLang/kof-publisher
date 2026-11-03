@@ -113,8 +113,13 @@ test "research: returns sourced candidates with both publication and consultatio
     var out = outOf(r)
     assert(has(out, "Kof 0.5.0-beta compila para JVM"), out)
     assert(has(out, "https://example.invalid/kof-050"), out)
-    assert(has(out, "publicado : 2026-10-10T12:00:00Z"), out)
-    assert(has(out, "consultado: 2026-"), out)
+    // A fixture usa datas RELATIVAS (iso_ago) para nao envelhecer, entao o
+    // instante exato muda a cada execucao. O que o teste precisa provar e que
+    // as DUAS datas vem juntas e em ISO-8601: a de publicacao (do item, 50h
+    // atras) e a de consulta (agora). Um literal aqui quebrava a suite sozinha
+    // assim que o relogio passava do instante gravado.
+    assert(has(out, "publicado : 20"), out)
+    assert(has(out, "consultado: 20"), out)
     // the HN item with no url must be linked back to its HN discussion, not dropped
     assert(has(out, "news.ycombinator.com/item?id=333"), out)
     // dev.to and lobste.rs answered too

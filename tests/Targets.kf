@@ -240,3 +240,33 @@ test "targets: publishing as a page reaches the API once and marks the item publ
     stopLm("tg-page")
     stopStub("tg-page")
 }
+
+// THE PRODUCTION CONFIGURATION: an autonomous profile publishing to a PERSONAL
+// profile with the opt-in enabled — the exact combination this project runs in.
+// Proves the publish really happens once, and that the credential stays out of
+// the database, the profile and the logs (spec §4: secrets never persisted).
+test "targets: autonomous + personal URN with opt-in publishes once, token never persisted" {
+    prepare("tg-prod", "autonomous")
+    writeLinkedInStub("tg-prod")
+    startStub("tg-prod", "11988")
+    startLm("tg-prod", "11989")
+
+    var g = cliAsPerson("tg-prod", "11988", "11989", "true", "generate --topic 'engenharia de software' --publish-ok --company company.kofmd --store pub.db")
+    assert(exitOf(g) == 0, g)
+    assert(postCount("tg-prod") == "1", "expected exactly one POST with the opt-in enabled:\n" + g)
+    assert(onlyStatus("tg-prod", "pub.db") == "published", "item did not end published:\n" + onlyStatus("tg-prod", "pub.db"))
+
+    // the request carried the PERSONAL urn and an auth header
+    var log = runCmd("cat '" + workDir("tg-prod") + "/li.log'")
+    var body = outOf(log)
+    assert(has(body, "urn:li:person:FAKEPERSON"), "personal URN missing from the request:\n" + body)
+    assert(has(body, "\"auth\": true"), "no Authorization header was sent:\n" + body)
+
+    // the credential is NOWHERE on disk: not in the request log, not in the
+    // SQLite file, not in the publisher log, not in the profile
+    var leaked = runCmd("grep -rl 'FAKEstub-token-not-real' '" + workDir("tg-prod") + "' 2>/dev/null || echo CLEAN")
+    assert(has(outOf(leaked), "CLEAN"), "the token was persisted to disk:\n" + leaked)
+
+    stopLm("tg-prod")
+    stopStub("tg-prod")
+}

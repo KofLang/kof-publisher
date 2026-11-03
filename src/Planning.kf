@@ -344,7 +344,7 @@ String boolWord(Bool b) {
 // A story actually read from a source. The theme is the story; the argument is
 // left for the generation step to develop FROM the evidence, not asserted here.
 PlanCandidate candidateFromResearch(ResearchItem it) {
-    var ev = "fonte " + it.publisher() + " (" + it.source_type() + ") " + it.url() + " publicado_em=" + firstNonEmpty(it.published_at(), "(sem data)") + " consultado_em=" + it.fetched_at()
+    var ev = "fonte " + it.publisher() + " (" + it.source_type() + ") " + it.url() + " publicado_em=" + firstNonEmpty(it.published_at(), "(sem data)") + " consultado_em=" + it.fetched_at() + " extensao=" + researchExtent(it.summary(), it.source_type())
     var urls = listOf<String>()
     urls.add(it.url())
     return PlanCandidate("noticias", it.title(), firstNonEmpty(it.summary(), it.title()), it.topic_key(), ev, urls, 0, listOf<String>(), "research", it.published_at(), it.fetched_at(), it.url())
@@ -469,8 +469,18 @@ Bool planStopWord(String w) {
 }
 
 // Originality: penalize material that repeats what was recently planned or
-// published. Lexical, like the rest of the memory layer, and its gap is the
-// same documented one (a reworded thesis is not caught).
+// published. Two layers:
+//
+//   lexical   n-gram overlap over the raw theme+argument (the original check)
+//   semantic  thesis-signature comparison (src/Thesis.kf), which catches the
+//             reworded restatement the lexical layer cannot see
+//
+// The SEMANTIC verdict is the stronger one and can zero the component outright:
+// when the thesis itself is the same, no amount of different wording makes it a
+// new pauta. The signatures are computed HERE from the recent items rather than
+// read from a stored column, so a legacy pauta recorded before the column
+// existed is still compared (it has a theme and an argument, which is all the
+// signature needs).
 Int scoreOriginality(PlanCandidate c, List<String> recentThemes, List<String> notes) {
     var worst = 0
     for (var r in recentThemes) {
@@ -479,9 +489,41 @@ Int scoreOriginality(PlanCandidate c, List<String> recentThemes, List<String> no
             worst = ov
         }
     }
+    // The semantic component applies to candidates whose material IS a thesis
+    // (a news subject, a registered opinion). A repo candidate's text is a
+    // template, so the template comparison would zero every repo's originality
+    // (measured 2026-10-12: two unrelated repos scored 88%). Repos are still
+    // covered by the lexical component above, which distinguishes them by name.
+    var mine = planThesisText(c)
+    var worstThesis = 0
+    if (c.origin() != "repo") {
+        for (var r in recentThemes) {
+            if (thesisSignature(r) == "" || thesisSignature(mine) == "") {
+                continue
+            }
+            // Only a pair the gate would actually call "the same thesis" counts
+            // against originality. Raw overlap alone would also down-score a
+            // same-subject/different-stance pair, which the spec says is allowed.
+            if (!thesisLooksRepeated(mine, r)) {
+                continue
+            }
+            var ov = thesisOverlapPercent(thesisSignature(mine), thesisSignature(r))
+            if (ov > worstThesis) {
+                worstThesis = ov
+            }
+        }
+    }
+    if (worstThesis >= 45) {
+        notes.add("originalidade=0 (TESE repetida, " + worstThesis + "% de sobreposicao semantica com pauta recente)")
+        return 0
+    }
     if (worst >= 55) {
         notes.add("originalidade=0 (sobreposicao " + worst + "% com pauta recente)")
         return 0
+    }
+    if (worstThesis >= 30) {
+        notes.add("originalidade=8 (tese proxima, " + worstThesis + "% de sobreposicao semantica)")
+        return 8
     }
     if (worst >= 30) {
         notes.add("originalidade=8 (sobreposicao " + worst + "% com pauta recente)")
@@ -499,6 +541,178 @@ PlanCandidate scoreCandidate(Company company, PlanCandidate c, List<String> rece
     total = total + scoreRelevance(company, c, notes)
     total = total + scoreOriginality(c, recentThemes, notes)
     return PlanCandidate(c.function(), c.theme(), c.argument(), c.topic_key(), c.evidence(), c.source_urls(), total, notes, c.origin(), c.published_at(), c.fetched_at(), c.origin_ref())
+}
+
+// Is this candidate's thesis already in the recent memory? The HARD pre-
+// generation gate: a pauta whose thesis is a restatement of something recent is
+// refused outright, no matter how well it scores on the other components. This
+// is the check the spec asks for "antes da geracao".
+Bool thesisAlreadyUsed(String themeAndArgument, List<String> recentThemes) {
+    if (thesisSignature(themeAndArgument) == "") {
+        return false
+    }
+    for (var r in recentThemes) {
+        if (thesisSignature(r) == "") {
+            continue
+        }
+        // RAW texts, not signatures: the polarity guard needs the negators,
+        // which the signature strips as stopwords.
+        if (thesisLooksRepeated(themeAndArgument, r)) {
+            return true
+        }
+    }
+    return false
+}
+
+// Which declared SUBJECT does this text belong to? "" when none matches.
+// A subject is a recurring theme the author declared in the profile
+// ("ia: ia, llm, modelo, hype..."), and it is the level at which "nao da para
+// falar disso todo dia" is decided — the thesis gate works at the level BELOW
+// (which argument), so three different arguments about AI all pass it.
+String planSubjectOf(Company company, String text) {
+    if (company.subjects().size() == 0 || text.trim() == "") {
+        return ""
+    }
+    var low = strings.toSnakeCase(asciiFold(text))
+    for (var entry in company.subjects()) {
+        var colon = entry.indexOf(":")
+        if (colon <= 0) {
+            continue
+        }
+        var name = entry.substring(0, colon).trim()
+        var kws = entry.substring(colon + 1, entry.length)
+        for (var kw in kws.split(",")) {
+            var kraw = kw.trim()
+            if (kraw == "") {
+                continue
+            }
+            if (isAcronymKeyword(kraw)) {
+                // "IA" is the acronym; "ia" is the verb ("eu ia"). Case matters,
+                // and the ascii fold would erase it.
+                if (rawTokenHit(text, kraw)) {
+                    return name
+                }
+            } else {
+                // Whole token, so "ia"/"modelo" do not match inside longer words
+                // ("familia", "modelagem"). Both NUMBER forms are tried: a
+                // keyword list that says "tokens" must still catch a text that
+                // says "token" (measured 2026-10-13: the singular slipped
+                // through and an IA post was chosen while the subject was
+                // supposed to be in cooldown).
+                var k = strings.toSnakeCase(asciiFold(kraw))
+                if (wholeTokenHit(low, k)) {
+                    return name
+                }
+                if (k.length > 3 && k.endsWith("s")) {
+                    if (wholeTokenHit(low, k.substring(0, k.length - 1))) {
+                        return name
+                    }
+                } else {
+                    if (wholeTokenHit(low, k + "s")) {
+                        return name
+                    }
+                }
+            }
+        }
+    }
+    return ""
+}
+
+// Has this subject been used inside the cooldown window? The window is the most
+// recent `n` editorial items (pautas AND published topics), so a subject used
+// today is not chosen again today — and with 4 posts a day, a 4-item window
+// means roughly "not two days running".
+Bool planSubjectInCooldown(Company company, String text, List<String> recentThemes, Int window) {
+    var subj = planSubjectOf(company, text)
+    if (subj == "") {
+        return false
+    }
+    var i = 0
+    var seen = 0
+    while (i < recentThemes.size() && seen < window) {
+        var r = recentThemes.get(i)
+        if (r.trim() != "") {
+            seen = seen + 1
+            if (planSubjectOf(company, r) == subj) {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// A repository pauta's subject is the ARTIFACT, not the sentence around it.
+// Its theme is a TEMPLATE ("atualizacao no projeto <repo>") and its argument is
+// either the repo description or another template ("o que mudou em <repo>"), so
+// every repo candidate shares almost the same words. Comparing that template
+// semantically is meaningless: two UNRELATED repos scored 88% and 72% against
+// each other (above the 45% threshold), which refused all 16 repositories and
+// emptied the 06:00 projects slot with a misleading reason (measured
+// 2026-10-12). The repetition question for a repo is simply "is this same
+// repository already in the recent history?", which is an identity match on the
+// repo name — an identifier, not prose.
+Bool repoAlreadyUsed(String fullName, List<String> recentThemes) {
+    if (fullName == "") {
+        return false
+    }
+    for (var r in recentThemes) {
+        if (r.indexOf(fullName) >= 0) {
+            return true
+        }
+    }
+    return false
+}
+
+// The text that represents this candidate's SUBJECT for repetition purposes.
+//
+// A PROFILE candidate already carries the author's exact words in `theme`, and
+// its `argument` is either the same text a second time (`candidateFromOpinion`)
+// or a boilerplate prefix shared by EVERY entry of that list
+// (`candidateFromReject`: "observacao sobre um padrao que a autora recusa: ...").
+// Concatenating theme+argument therefore compares two parts of the same
+// sentence plus a CONSTANT, which inflates the similarity between candidates
+// that have nothing to do with each other. Measured 2026-10-12: eleven
+// UNRELATED `rejects` scored 47-53% against each other purely from the shared
+// boilerplate, the whole 18:00 slot was refused, and no observation post went
+// out. Comparing the theme alone is comparing the subject.
+String planThesisText(PlanCandidate c) {
+    if (c.origin() == "profile") {
+        return c.theme()
+    }
+    return c.theme() + " " + c.argument()
+}
+
+// The pre-generation repetition gate, dispatched by ORIGIN: a repo is checked
+// by identity, everything else by thesis. Getting this dispatch wrong is what
+// broke the projects slot (2026-10-12) and, in the profile case, the 18:00
+// slot (same day).
+// Why this candidate is repetition, or "" when it is fine. The reason is a
+// string so the report can say WHICH kind of repetition fired — "mesmo assunto"
+// and "mesma tese" are different problems and the author should be able to tell
+// them apart.
+String planRepetitionReason(Company company, PlanCandidate c, List<String> recentThemes, Int subjectWindow) {
+    if (c.origin() == "repo") {
+        if (repoAlreadyUsed(c.origin_ref(), recentThemes)) {
+            return "mesmo repositorio"
+        }
+        return ""
+    }
+    // SUBJECT first: "don't talk about AI every day" is about the subject, a
+    // level ABOVE the argument, and it is checked first because a
+    // same-subject/different-argument candidate passes the thesis gate by design.
+    var subj = planSubjectOf(company, planThesisText(c))
+    if (subj != "" && planSubjectInCooldown(company, planThesisText(c), recentThemes, subjectWindow)) {
+        return "assunto '" + subj + "' em cooldown"
+    }
+    if (thesisAlreadyUsed(planThesisText(c), recentThemes)) {
+        return "mesma tese"
+    }
+    return ""
+}
+
+Bool planAlreadyUsed(Company company, PlanCandidate c, List<String> recentThemes, Int subjectWindow) {
+    return planRepetitionReason(company, c, recentThemes, subjectWindow) != ""
 }
 
 // ---- gathering ----
@@ -528,6 +742,16 @@ List<PlanCandidate> planResearchCandidates(ResearchRun run, Int maxAgeHours) {
         // story that is provably older than the window is dropped: news that is
         // not current is not news.
         if (maxAgeHours > 0 && age >= 0 && age > maxAgeHours) {
+            continue
+        }
+        // A news post needs something to say ABOUT the item, and a headline is
+        // not something. An aggregator item carries only the title plus a score
+        // ("212 pontos na front page"); writing from that produces a post that
+        // restates the headline and admits it could not verify anything.
+        // Measured 2026-10-13: the 12:00 post was exactly that and the author
+        // rejected it. Require content the SOURCE published (extent "resumo").
+        var ext = researchExtent(it.summary(), it.source_type())
+        if (ext == "titulo" || ext == "metadados") {
             continue
         }
         out.add(candidateFromResearch(it))
@@ -588,7 +812,7 @@ PlanCandidate bestOf(List<PlanCandidate> scored) {
 // the real run of 2026-10-11, where the news model kept inventing an absence
 // about one item and the slot produced nothing while 39 other candidates sat
 // unused.
-List<PlanCandidate> planAlternates(Company company, Store store, ResearchRun research, Int repoMaxAgeDays, List<String> recentThemes, String job, List<String> usedKeys) {
+List<PlanCandidate> planAlternates(Company company, Store store, ResearchRun research, Int repoMaxAgeDays, List<String> recentThemes, String job, List<String> usedKeys, Int subjectWindow) {
     var pool = listOf<PlanCandidate>()
     if (job == "projetos") {
         pool = planRepoCandidates(store, repoMaxAgeDays)
@@ -607,6 +831,11 @@ List<PlanCandidate> planAlternates(Company company, Store store, ResearchRun res
             if (k == s.topic_key()) {
                 taken = true
             }
+        }
+        // Same hard gate as buildPlan (identity for repos, thesis otherwise):
+        // an alternate is only useful if it is DIFFERENT material.
+        if (!taken && planAlreadyUsed(company, s, recentThemes, subjectWindow)) {
+            taken = true
         }
         if (!taken) {
             scored.add(s)
@@ -634,7 +863,7 @@ List<PlanCandidate> planAlternates(Company company, Store store, ResearchRun res
 
 // Build the plan: one choice per slot, in slot order. Slots that cannot be
 // filled honestly come back with chosen=false and a reason.
-PlanSet buildPlan(Company company, Store store, ResearchRun research, Int repoMaxAgeDays, List<String> recentThemes) {
+PlanSet buildPlan(Company company, Store store, ResearchRun research, Int repoMaxAgeDays, List<String> recentThemes, Int subjectWindow) {
     var notes = listOf<String>()
     // repoMaxAgeDays == 0 means NO age limit (every analysed repo is a
     // candidate); a positive value narrows it to repos that moved recently.
@@ -667,6 +896,17 @@ PlanSet buildPlan(Company company, Store store, ResearchRun research, Int repoMa
         var pool = listOf<PlanCandidate>()
         if (job == "projetos") {
             pool = repoScored
+            // Kof is the author's own language and her main project, so a Kof
+            // item from the research pass is material for the "trabalho real"
+            // slot too — not only for the news slot. Only Kof items are added:
+            // the projects slot must stay about HER work, and a general story
+            // belongs at noon. `usedKeys` still stops the same item from being
+            // taken by both slots in one run.
+            for (var kc in newsScored) {
+                if (mentionsKof(kc.theme() + " " + kc.argument())) {
+                    pool.add(kc)
+                }
+            }
         } else {
             if (job == "noticias") {
                 pool = newsScored
@@ -681,6 +921,8 @@ PlanSet buildPlan(Company company, Store store, ResearchRun research, Int repoMa
             }
         }
         var scored = listOf<PlanCandidate>()
+        var refusedByThesis = 0
+        var refusedWhy = ""
         for (var c in pool) {
             // Score against the history AND against what earlier slots in THIS
             // run already took. Without the second part, two opinion slots can
@@ -692,6 +934,22 @@ PlanSet buildPlan(Company company, Store store, ResearchRun research, Int repoMa
             for (var k in usedKeys) {
                 if (k == s.topic_key()) {
                     taken = true
+                }
+            }
+            // HARD pre-generation gate (spec §8: compare "antes da geracao").
+            // A candidate whose THESIS restates something already planned is
+            // refused here, not merely down-scored: generating it and discarding
+            // it afterwards wastes a model call and leaves the slot looking
+            // empty. Down-scoring alone was not enough — a strong-enough
+            // recency/evidence score could still push a restatement to the top.
+            if (!taken) {
+                var rep = planRepetitionReason(company, s, runThemes, subjectWindow)
+                if (rep != "") {
+                    taken = true
+                    refusedByThesis = refusedByThesis + 1
+                    if (refusedWhy == "") {
+                        refusedWhy = rep
+                    }
                 }
             }
             if (!taken) {
@@ -707,16 +965,39 @@ PlanSet buildPlan(Company company, Store store, ResearchRun research, Int repoMa
                 if (research.failures() > 0 && research.items().size() == 0) {
                     why = "nenhuma fonte respondeu (" + research.failures() + " falha(s)) — sem noticia verificavel, nada inventado"
                 } else {
-                    why = "nenhuma noticia dentro da janela de atualidade configurada"
+                    why = "nenhuma noticia com CONTEUDO legivel: " + research.items().size() + " item(ns) consultado(s), todos so com manchete/metadados — um post de noticia precisa de algo que a fonte publicou sobre o item, nao so o titulo"
                 }
+            }
+            if (refusedByThesis > 0) {
+                why = why + "; " + refusedByThesis + " candidato(s) recusado(s) por repeticao com pauta recente (" + refusedWhy + ")"
             }
             choices.add(PlanChoice(job, cat.name(), cat.clock(), cat.label(), cat.angle(), false, emptyCandidate(), why))
             continue
         }
         var best = bestOf(scored)
+        // QUALITY FLOOR on the primary pick, for the same reason the retry path
+        // has one: the projects slot must report what MOVED, and a repository
+        // whose last push is years old has nothing to report as today's change.
+        // Measured 2026-10-12: with every recent repo refused by the (then
+        // buggy) thesis gate, the slot fell through to a repo 767 days old and
+        // scored 38/100 — publishing a two-year-old project as "what changed".
+        // Below the floor the slot is honestly empty.
+        if (job == "projetos" && best.score() < 55) {
+            var whyOld = "nenhum projeto com atividade recente o bastante: o melhor candidato (" + best.theme() + ") pontua " + best.score() + "/100 (" + joinList(best.score_notes()) + ")"
+            choices.add(PlanChoice(job, cat.name(), cat.clock(), cat.label(), cat.angle(), false, emptyCandidate(), whyOld))
+            continue
+        }
         usedKeys.add(best.topic_key())
         runThemes.add(best.theme() + " " + best.argument())
-        choices.add(PlanChoice(job, cat.name(), cat.clock(), cat.label(), cat.angle(), true, best, ""))
+        // Surface the repetition refusals even when the slot SUCCEEDED: "chose
+        // the architecture opinion because AI was in cooldown" is exactly the
+        // reasoning the author wants to be able to see, and it used to be
+        // visible only when the slot ended up empty.
+        var okNote = ""
+        if (refusedByThesis > 0) {
+            okNote = refusedByThesis + " candidato(s) recusado(s) antes deste (" + refusedWhy + ")"
+        }
+        choices.add(PlanChoice(job, cat.name(), cat.clock(), cat.label(), cat.angle(), true, best, okNote))
     }
     return PlanSet(choices, notes)
 }

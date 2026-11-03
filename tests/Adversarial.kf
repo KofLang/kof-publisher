@@ -1,0 +1,609 @@
+// Adversarial suite (spec §11). Each test reproduces ONE real defect or its
+// close variant, drives the REAL pipeline (CLI + fixtures, no Kof-side stubs)
+// and asserts the system refuses to make the unsupported claim.
+//
+// The letter tags map to the spec's list:
+//   A title-only tool, implementation invented          -> pl-adv-a
+//   B product summary, hardware/energy/precision added  -> pl-adv-b
+//   C README future feature described as already done   -> pl-adv-c
+//   D repo has tests, "all passed" without running      -> pl-adv-d (Planning)
+//   E commit exists, author claimed to have done it     -> pl-adv-e (Identity)
+//   F claims to have read the whole article             -> pl-adv-f (Identity)
+//   G same thesis, different vocabulary                 -> pl-adv-g
+//   H same subject, different conclusion (allowed)      -> pl-adv-h
+//   I no adequate recent sources found                  -> pl-adv-i
+//   J source with no verifiable publication date        -> pl-adv-j
+//   K plausible claims with no evidence attached        -> pl-adv-k
+//   L hostile source instructions                       -> pl-adv-l (Research/Github)
+//   M source with credentials                           -> pl-adv-m (Research/Github)
+//   N migration over a legacy base with review rows     -> pl-adv-n (Research)
+//   O daemon already active, start again                -> pl-adv-o (Service)
+//   P generation failure past the retry limit           -> pl-adv-p
+
+String envOr(String key, String dflt) {
+    var v = config.env(key)
+    if (v != null && v != "") {
+        return v
+    }
+    return dflt
+}
+
+String publisherDir() {
+    return envOr("KOF_PUBLISHER_DIR", "/home/mel/Documentos/kof-publisher")
+}
+
+String classpath() {
+    var home = envOr("HOME", "/home/mel")
+    var drv = envOr("KOF_SQLITE_JAR", home + "/.kof/deps/org/xerial/sqlite-jdbc/3.53.4.0/sqlite-jdbc-3.53.4.0.jar")
+    return envOr("KOF_PUBLISHER_CLASSES", publisherDir() + "/build/classes")
+        + ":" + home + "/.local/share/kof/lib/kof.jar:" + drv
+}
+
+String workDir(String name) {
+    return "/tmp/kof-pub-tests/" + name
+}
+
+void prepare(String name) {
+    var r = process.run("sh", "-c", "rm -rf '" + workDir(name) + "' && mkdir -p '" + workDir(name) + "/home'")
+    assert(r.exitCode == 0, "prepare " + name + ": " + r.stderr)
+}
+
+String runCmd(String cmd) {
+    var r = process.run("sh", "-c", cmd + " 2>&1")
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+Int exitOf(String blob) {
+    var i = blob.indexOf("||EXIT=")
+    if (i < 0) {
+        throw "no exit marker"
+    }
+    return blob.substring(i + 7).toInt()
+}
+
+String outOf(String blob) {
+    var i = blob.indexOf("||EXIT=")
+    return blob.substring(0, i)
+}
+
+Bool has(String hay, String needle) {
+    return hay.indexOf(needle) >= 0
+}
+
+// First "pub-..." token in a blob of text. Plain character scanning (Kof has
+// no regex in this runtime), enough for the plan's "id: pub-..." lines.
+String firstIdIn(String blob) {
+    var marker = "id: pub-"
+    var at = blob.indexOf(marker)
+    if (at < 0) {
+        return ""
+    }
+    var start = at + 4
+    var end = start
+    while (end < blob.length) {
+        var c = blob.charAt(end)
+        var okChar = (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 45
+        if (!okChar) {
+            break
+        }
+        end = end + 1
+    }
+    return blob.substring(start, end)
+}
+
+String startResearch(String name, String port, String mode) {
+    runCmd("pkill -f 'fake_researc[h].py " + port + "' || true; true")
+    var up = runCmd("{ python3 '" + publisherDir() + "/tests/fake_research.py' " + port + " " + mode + " > '" + workDir(name) + "/rs.log' 2>&1 & echo $! > '" + workDir(name) + "/rs.pid'; }; sleep 1; curl -s -m 4 http://127.0.0.1:" + port + "/health")
+    assert(exitOf(up) == 0 && outOf(up).trim() == "ok", up)
+    return outOf(up)
+}
+
+void stopResearch(String name) {
+    runCmd("kill $(cat '" + workDir(name) + "/rs.pid') 2>/dev/null || true")
+}
+
+String startLm(String name, String port) {
+    runCmd("pkill -f 'fake_lm_persona[l].py " + port + "' || true; true")
+    var up = runCmd("cd '" + workDir(name) + "' && { python3 '" + publisherDir() + "/tests/fake_lm_personal.py' " + port + " distinct > lm.log 2>&1 & echo $! > lm.pid; }; sleep 1; curl -s -m 4 http://127.0.0.1:" + port + "/api/tags | grep -c models")
+    assert(exitOf(up) == 0, up)
+    return outOf(up)
+}
+
+void stopLm(String name) {
+    runCmd("kill $(cat '" + workDir(name) + "/lm.pid') 2>/dev/null || true")
+}
+
+// The same LM fixture in an explicit reply mode (the default above is
+// "distinct"), for tests that need one specific draft shape.
+String startLmMode(String name, String port, String mode) {
+    runCmd("pkill -f 'fake_lm_persona[l].py " + port + "' || true; true")
+    var up = runCmd("cd '" + workDir(name) + "' && { python3 '" + publisherDir() + "/tests/fake_lm_personal.py' " + port + " " + mode + " > lm.log 2>&1 & echo $! > lm.pid; }; sleep 1; curl -s -m 4 http://127.0.0.1:" + port + "/api/tags | grep -c models")
+    assert(exitOf(up) == 0, up)
+    return outOf(up)
+}
+
+// Full pipeline: research fixture + LM fixture, pointed at via env.
+String cliPlan(String name, String rsPort, String lmPort, String args) {
+    var base = "http://127.0.0.1:" + rsPort
+    var cmd = "cd '" + workDir(name) + "' && KOF_PUBLISHER_HOME='" + workDir(name) + "/home'"
+        + " KOF_RESEARCH_HN_API='" + base + "/hn'"
+        + " KOF_RESEARCH_DEVTO_API='" + base + "/devto'"
+        + " KOF_RESEARCH_LOBSTERS_API='" + base + "/lobsters'"
+        + " KOF_RESEARCH_TIMEOUT=10"
+        + " KOF_LM_URL=http://127.0.0.1:" + lmPort + " KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25"
+        + " java -cp '" + classpath() + "' Default.Main " + args + " 2>&1"
+    var r = process.run("sh", "-c", cmd)
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+String startGithubFixture(String name, String port, String mode) {
+    runCmd("pkill -f 'fake_githu[b].py " + port + "' || true; true")
+    var up = runCmd("{ python3 '" + publisherDir() + "/tests/fake_github.py' " + port + " " + mode + " > '" + workDir(name) + "/gh.log' 2>&1 & echo $! > '" + workDir(name) + "/gh.pid'; }; sleep 1; curl -s -m 4 http://127.0.0.1:" + port + "/health")
+    assert(exitOf(up) == 0 && outOf(up).trim() == "ok", up)
+    return outOf(up)
+}
+
+void stopGithubFixture(String name) {
+    runCmd("kill $(cat '" + workDir(name) + "/gh.pid') 2>/dev/null || true")
+}
+
+// A profile with ONLY the news slot, so a news test cannot be muddied by the
+// opinion slots generating their own text.
+String newsOnlyCompany() {
+    var c = "# company\nname: Adversarial\n\n# topics\ntopics:\n  - engenharia de software\n  - linguagens de programacao e compiladores\n\n"
+    c = c + "# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\ntarget: linkedin\n\n"
+    c = c + "# editorial\nrequire_material: true\nresearch:\n  - hackernews\n  - devto\nresearch_max_age_hours: 168\n\n"
+    c = c + "# category noon\nclock: 12:00\nlabel: noticia de tecnologia\nfunction: noticias\nangle: noticia recente\n"
+    return c
+}
+
+// A profile with all four slots and a github source, for the projects tests.
+String advCompany() {
+    var c = "# company\nname: Adversarial\n\n# topics\ntopics:\n  - engenharia de software\n  - Java e o ecossistema JVM\n\n# opinions\nopinions:\n"
+    c = c + "  - prefere complexidade justificada a complexidade de moda\n"
+    c = c + "  - desconfia de metrica de produtividade que mede atividade em vez de resultado\n\n"
+    c = c + "# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\ntarget: linkedin\n\n"
+    c = c + "# editorial\nrequire_material: true\nresearch:\n  - hackernews\n  - devto\nresearch_max_age_hours: 168\nretention_records: 10000\nretention_max_gb: 20\n\n"
+    c = c + "# github\naccount: melmonfre\nenabled: true\norgs:\n  - KofLang\n\n"
+    c = c + "# category morning\nclock: 06:00\nlabel: trabalho real\nfunction: projetos\nangle: o que mudou no projeto\n\n"
+    c = c + "# category noon\nclock: 12:00\nlabel: noticia\nfunction: noticias\nangle: noticia recente\n\n"
+    c = c + "# category afternoon\nclock: 15:00\nlabel: contraponto\nfunction: contraponto\nangle: discorde do hype\n\n"
+    c = c + "# category night\nclock: 18:00\nlabel: observacao\nfunction: observacao\nangle: observacao sobre engenharia\n"
+    return c
+}
+
+// Plan with research + LM fixtures pointed at via env. The github fixture is
+// optional (empty string skips the `github` command).
+String advPlan(String name, String rsPort, String lmPort, String mode, String args) {
+    var base = "http://127.0.0.1:" + rsPort
+    var cmd = "cd '" + workDir(name) + "' && KOF_PUBLISHER_HOME='" + workDir(name) + "/home'"
+        + " KOF_RESEARCH_HN_API='" + base + "/hn'"
+        + " KOF_RESEARCH_DEVTO_API='" + base + "/devto'"
+        + " KOF_RESEARCH_TIMEOUT=10"
+        + " KOF_LM_URL=http://127.0.0.1:" + lmPort + " KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25"
+        + " java -cp '" + classpath() + "' Default.Main " + args + " 2>&1"
+    return runCmd(cmd)
+}
+
+// ---- A: title only, implementation invented ----
+
+test "adversarial A: a title-only item cannot ground a description of how it works" {
+    prepare("pl-adv-a")
+    File(workDir("pl-adv-a") + "/company.kofmd").writeText(newsOnlyCompany())
+    startResearch("pl-adv-a", "12100", "substance")
+    startLmMode("pl-adv-a", "12101", "localclaim")
+    var p = advPlan("pl-adv-a", "12100", "12101", "substance", "plan --company company.kofmd --store pub.db")
+    var out = outOf(p)
+    // The fixture asserts the tool "roda no dispositivo e processa tudo
+    // localmente"; the consulted blurb never states where it runs, so the
+    // property is ungrounded. (A title-only item no longer reaches generation
+    // at all — that is covered by "a headline-only item never becomes a
+    // candidate" — so this test uses a source that DID publish content.)
+    assert(has(out, "nao descreva o mecanismo"), out)
+    assert(has(out, "1 descartada(s) pela validacao"), out)
+    var pub = advPlan("pl-adv-a", "12100", "12101", "substance", "list --status published --company company.kofmd --store pub.db")
+    assert(has(outOf(pub), "nenhuma"), pub)
+    stopLm("pl-adv-a")
+    stopResearch("pl-adv-a")
+}
+
+// ---- B: product summary, hardware/energy/precision added ----
+
+test "adversarial B: a product blurb cannot ground hardware or energy claims" {
+    prepare("pl-adv-b")
+    File(workDir("pl-adv-b") + "/company.kofmd").writeText(newsOnlyCompany())
+    startResearch("pl-adv-b", "12102", "productsummary")
+    // The fixture text claims the sensor "usa pouca bateria e mantem precisao
+    // de 16 bits" — the blurb says only that a temperature sensor was launched.
+    startLmMode("pl-adv-b", "12103", "hardwareclaim")
+    var p = advPlan("pl-adv-b", "12102", "12103", "productsummary", "plan --company company.kofmd --store pub.db")
+    var out = outOf(p)
+    // The blurb names the product and says nothing about how it behaves, so
+    // "usa pouca bateria mantendo leitura precisa" is a hardware claim the
+    // material never makes — the property check fires on it.
+    assert(has(out, "nao descreva o mecanismo"), out)
+    assert(has(out, "1 descartada(s) pela validacao"), out)
+    stopLm("pl-adv-b")
+    stopResearch("pl-adv-b")
+}
+
+// ---- C: README future feature described as already done ----
+
+test "adversarial C: a documented future feature is not described as already working" {
+    prepare("pl-adv-c")
+    File(workDir("pl-adv-c") + "/company.kofmd").writeText(advCompany())
+    startGithubFixture("pl-adv-c", "12104", "normal")
+    startResearch("pl-adv-c", "12105", "normal")
+    startLmMode("pl-adv-c", "12106", "planneddone")
+    var g = runCmd("cd '" + workDir("pl-adv-c") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-adv-c") + "/home' KOF_GITHUB_API=http://127.0.0.1:12104 java -cp '" + classpath() + "' Default.Main github --limit 10 --company company.kofmd --store pub.db")
+    assert(exitOf(g) == 0, g)
+    stopGithubFixture("pl-adv-c")
+    var p = advPlan("pl-adv-c", "12105", "12106", "normal", "plan --company company.kofmd --store pub.db")
+    var out = outOf(p)
+    // "ja esta em producao", "a integracao ja funciona" — the digest marks the
+    // integration as [documentado] and the publisher executed nothing.
+    assert(has(out, "o texto afirma que a verificacao aconteceu"), out)
+    stopLm("pl-adv-c")
+    stopResearch("pl-adv-c")
+}
+
+// ---- G: same thesis, different vocabulary ----
+
+test "adversarial G: a reworded restatement of a recent thesis is refused" {
+    prepare("pl-adv-g")
+    File(workDir("pl-adv-g") + "/company.kofmd").writeText(newsOnlyCompany())
+    // Run 1 consults "microsservicos sem necessidade adicionam latencia e
+    // custo". Run 2 consults the SAME argument in different words ("adotar
+    // distribuicao sem dor real traz latencia e mais manutencao"). The lexical
+    // memory cannot see that these are one thesis; the semantic gate must.
+    startResearch("pl-adv-g", "12107", "thesisagainst")
+    startLmMode("pl-adv-g", "12108", "distinct")
+    var p1 = advPlan("pl-adv-g", "12107", "12108", "thesisagainst", "plan --company company.kofmd --store pub.db")
+    assert(has(outOf(p1), "1 proposta(s) em REVIEW"), p1)
+    stopResearch("pl-adv-g")
+
+    startResearch("pl-adv-g", "12107", "thesisreworded")
+    var p2 = advPlan("pl-adv-g", "12107", "12108", "thesisreworded", "plan --company company.kofmd --store pub.db")
+    var out2 = outOf(p2)
+    assert(has(out2, "recusado(s) por repeticao com pauta recente"), out2)
+    assert(has(out2, "1 horario(s) sem material"), out2)
+    stopLm("pl-adv-g")
+    stopResearch("pl-adv-g")
+}
+
+// ---- H: same subject, different conclusion is allowed ----
+
+test "adversarial H: the same subject with a different conclusion is not repetition" {
+    prepare("pl-adv-h")
+    File(workDir("pl-adv-h") + "/company.kofmd").writeText(newsOnlyCompany())
+    // Run 1 consults the "against microservices" story. Run 2 consults a story
+    // on the SAME subject with the OPPOSITE stance ("resolvem gargalo
+    // organizacional e valem o custo"). The spec explicitly allows returning to
+    // a subject with a different, justified conclusion, so the semantic gate
+    // must NOT refuse it.
+    startResearch("pl-adv-h", "12109", "thesisagainst")
+    // "newsvary" returns a DIFFERENT draft per call, so the LEXICAL repetition
+    // gate does not discard run 2 and the test actually measures the SEMANTIC
+    // gate it is about.
+    startLmMode("pl-adv-h", "12110", "newsvary")
+    var p1 = advPlan("pl-adv-h", "12109", "12110", "thesisagainst", "plan --company company.kofmd --store pub.db")
+    assert(has(outOf(p1), "1 proposta(s) em REVIEW"), p1)
+    stopResearch("pl-adv-h")
+
+    startResearch("pl-adv-h", "12109", "thesisotherangle")
+    var p2 = advPlan("pl-adv-h", "12109", "12110", "thesisotherangle", "plan --company company.kofmd --store pub.db")
+    var out2 = outOf(p2)
+    assert(!has(out2, "recusado(s) por repeticao com pauta recente"), out2)
+    assert(!has(out2, "TESE repetida"), out2)
+    assert(has(out2, "1 proposta(s) em REVIEW"), out2)
+    stopLm("pl-adv-h")
+    stopResearch("pl-adv-h")
+}
+
+// ---- I: no adequate recent sources ----
+
+test "adversarial I: with no recent sources the news slot skips, nothing is invented" {
+    prepare("pl-adv-i")
+    File(workDir("pl-adv-i") + "/company.kofmd").writeText(newsOnlyCompany())
+    // "empty" = every source answers a well-formed but EMPTY list.
+    startResearch("pl-adv-i", "12111", "empty")
+    startLmMode("pl-adv-i", "12112", "distinct")
+    var p = advPlan("pl-adv-i", "12111", "12112", "empty", "plan --company company.kofmd --store pub.db")
+    var out = outOf(p)
+    assert(has(out, "SKIP"), out)
+    assert(has(out, "1 horario(s) sem material"), out)
+    var pub = advPlan("pl-adv-i", "12111", "12112", "empty", "list --status review --company company.kofmd --store pub.db")
+    assert(has(outOf(pub), "nenhuma"), pub)
+    stopLm("pl-adv-i")
+    stopResearch("pl-adv-i")
+}
+
+// ---- J: a source with no verifiable publication date ----
+
+test "adversarial J: a source with no date is recorded as dateless, not as fresh" {
+    prepare("pl-adv-j")
+    File(workDir("pl-adv-j") + "/company.kofmd").writeText(newsOnlyCompany())
+    startResearch("pl-adv-j", "12113", "nodate")
+    startLmMode("pl-adv-j", "12114", "distinct")
+    var p = advPlan("pl-adv-j", "12113", "12114", "nodate", "plan --company company.kofmd --store pub.db")
+    var out = outOf(p)
+    // The candidate is kept (the report shows it) but scores 0 on recency and
+    // SAYS the date is unrecognised — it is never silently treated as new.
+    assert(has(out, "data nao reconhecida"), out)
+    assert(has(out, "atualidade=0"), out)
+    stopLm("pl-adv-j")
+    stopResearch("pl-adv-j")
+}
+
+// ---- K: plausible claims with no evidence attached ----
+
+test "adversarial K: plausible technical claims with no evidence are caught" {
+    prepare("pl-adv-k")
+    File(workDir("pl-adv-k") + "/company.kofmd").writeText(advCompany())
+    startGithubFixture("pl-adv-k", "12115", "normal")
+    startResearch("pl-adv-k", "12116", "normal")
+    startLmMode("pl-adv-k", "12117", "plausible")
+    var g = runCmd("cd '" + workDir("pl-adv-k") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-adv-k") + "/home' KOF_GITHUB_API=http://127.0.0.1:12115 java -cp '" + classpath() + "' Default.Main github --limit 10 --company company.kofmd --store pub.db")
+    assert(exitOf(g) == 0, g)
+    stopGithubFixture("pl-adv-k")
+    var p = advPlan("pl-adv-k", "12116", "12117", "normal", "plan --company company.kofmd --store pub.db")
+    var out = outOf(p)
+    // "lock otimista que evita deadlock por construcao" is a design claim the
+    // repo digest never records. The deterministic proxy cannot judge every
+    // such claim; what it CAN do is refuse to call the draft validated, which
+    // is the honest outcome the spec asks for.
+    assert(has(out, "proxy mecanico"), out)
+    stopLm("pl-adv-k")
+    stopResearch("pl-adv-k")
+}
+
+// ---- P: generation failure past the retry limit leaves the slot empty ----
+
+test "adversarial P: a draft that never passes is discarded, the slot stays empty" {
+    prepare("pl-adv-p")
+    // The profile declares the avoid rule that the fixture text violates, so
+    // neither the first generation nor the revision round can pass the
+    // deterministic gate — the slot ends empty instead of storing a bad draft.
+    var c = newsOnlyCompany() + "\n# avoid\navoid:\n  - sinergia disruptiva\n"
+    File(workDir("pl-adv-p") + "/company.kofmd").writeText(c)
+    startResearch("pl-adv-p", "12118", "normal")
+    // The fixture text violates a hard editorial rule (an avoid-list phrase),
+    // so neither the first generation nor the revision round can pass.
+    startLmMode("pl-adv-p", "12119", "forbidden")
+    var p = advPlan("pl-adv-p", "12118", "12119", "normal", "plan --company company.kofmd --store pub.db")
+    var out = outOf(p)
+    assert(has(out, "DESCARTADO pela validacao"), out)
+    assert(has(out, "0 proposta(s) em REVIEW"), out)
+    assert(has(out, "violates company rule avoid"), out)
+    // nothing was approved or published as a consolation
+    var pub = advPlan("pl-adv-p", "12118", "12119", "normal", "list --status published --company company.kofmd --store pub.db")
+    assert(has(outOf(pub), "nenhuma"), pub)
+    stopLm("pl-adv-p")
+    stopResearch("pl-adv-p")
+}
+
+test "plan: paragraph breaks survive into the stored post" {
+    prepare("pl-paragraphs")
+    File(workDir("pl-paragraphs") + "/company.kofmd").writeText(newsOnlyCompany())
+    startResearch("pl-paragraphs", "12120", "normal")
+    startLmMode("pl-paragraphs", "12121", "paragraphs")
+    var p = advPlan("pl-paragraphs", "12120", "12121", "normal", "plan --company company.kofmd --store pub.db")
+    assert(has(outOf(p), "1 proposta(s) em REVIEW"), p)
+    // The stored content must keep the blank line between paragraphs. It was
+    // flattened before: cleanDraft ran strings.normalizeWhitespace over the
+    // whole text, which turns every newline into a space and leaves one dense
+    // block, against the profile's "3 a 6 paragrafos" rule.
+    var db = workDir("pl-paragraphs") + "/pub.db"
+    var dump = runCmd("python3 -c \"import sqlite3;print(repr(sqlite3.connect('" + db + "').execute('select content from publication').fetchone()[0]))\"")
+    assert(has(outOf(dump), "\\n\\n"), dump)
+    stopLm("pl-paragraphs")
+    stopResearch("pl-paragraphs")
+}
+
+test "plan: a DIFFERENT repository is not refused as a repeated thesis" {
+    prepare("pl-repo-rep")
+    // Repo candidates share a template ("atualizacao no projeto <repo>"), so a
+    // SEMANTIC comparison of the template made two unrelated repos score 88%
+    // and refused all 16 of them — the 06:00 projects slot went empty with a
+    // misleading reason (measured 2026-10-12). The gate must compare repos by
+    // IDENTITY: the same repo is a repeat, a different repo is new material.
+    //
+    // The check is on CANDIDATE SELECTION, not on the final draft: with no
+    // history, run 1 must offer a repo; with run 1's pauta in memory, run 2 must
+    // offer a DIFFERENT repo (and never "recusado por repetir a TESE").
+    File(workDir("pl-repo-rep") + "/company.kofmd").writeText(advCompany())
+    startGithubFixture("pl-repo-rep", "12130", "normal")
+    startResearch("pl-repo-rep", "12131", "normal")
+    startLmMode("pl-repo-rep", "12132", "newsvary")
+    var g = runCmd("cd '" + workDir("pl-repo-rep") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-repo-rep") + "/home' KOF_GITHUB_API=http://127.0.0.1:12130 java -cp '" + classpath() + "' Default.Main github --limit 10 --company company.kofmd --store pub.db")
+    assert(exitOf(g) == 0, g)
+    stopGithubFixture("pl-repo-rep")
+
+    var p1 = advPlan("pl-repo-rep", "12131", "12132", "normal", "plan --company company.kofmd --store pub.db")
+    var out1 = outOf(p1)
+    assert(has(out1, "tema: atualizacao no projeto"), out1)
+
+    var p2 = advPlan("pl-repo-rep", "12131", "12132", "normal", "plan --company company.kofmd --store pub.db")
+    var out2 = outOf(p2)
+    // Scope the check to the PROJECTS slot (06:00): the opinion slots
+    // legitimately refuse their candidates as repeated theses (they have only
+    // two opinions), so checking the whole output failed on the wrong slot.
+    var slot06 = out2
+    var at06 = out2.indexOf("06:00")
+    var at12 = out2.indexOf("12:00")
+    if (at06 >= 0 && at12 > at06) {
+        slot06 = out2.substring(at06, at12)
+    }
+    assert(!has(slot06, "recusado(s) por repeticao com pauta recente"), slot06)
+    assert(has(slot06, "tema: atualizacao no projeto"), slot06)
+    stopLm("pl-repo-rep")
+    stopResearch("pl-repo-rep")
+}
+
+test "plan: a phrase split across two sentences is not an episode" {
+    prepare("pl-episode-boundary")
+    // "... um telefone ser viavel no dia a dia. Eu comecei com Java em 2009 ..."
+    // — "no dia a dia" ends one sentence and "Eu" starts the next. Normalizing
+    // the punctuation away glued them into "no dia a dia eu", a mark that only
+    // means an episode when it is really one clause. The real 12:00 draft of
+    // 2026-10-12 was discarded by exactly this false positive.
+    File(workDir("pl-episode-boundary") + "/company.kofmd").writeText(newsOnlyCompany())
+    startResearch("pl-episode-boundary", "12140", "normal")
+    startLmMode("pl-episode-boundary", "12141", "episodeboundary")
+    var p = advPlan("pl-episode-boundary", "12140", "12141", "normal", "plan --company company.kofmd --store pub.db")
+    var out = outOf(p)
+    assert(!has(out, "narra um episodio em primeira pessoa"), out)
+    assert(has(out, "1 proposta(s) em REVIEW"), out)
+    stopLm("pl-episode-boundary")
+    stopResearch("pl-episode-boundary")
+}
+
+test "kof: a Kof post gets the battle cry last and the project link" {
+    prepare("pl-kof")
+    File(workDir("pl-kof") + "/company.kofmd").writeText(newsOnlyCompany())
+    startResearch("pl-kof", "12150", "normal")
+    startLmMode("pl-kof", "12151", "kofnosign")
+    var p = advPlan("pl-kof", "12150", "12151", "normal", "plan --company company.kofmd --store pub.db")
+    assert(has(outOf(p), "1 proposta(s) em REVIEW"), p)
+    var db = workDir("pl-kof") + "/pub.db"
+    var dump = runCmd("python3 -c \"import sqlite3;print(sqlite3.connect('" + db + "').execute('select content from publication').fetchone()[0])\"")
+    var txt = outOf(dump)
+    // the link is present and the battle cry is the LAST line
+    assert(has(txt, "https://koflang.github.io"), txt)
+    assert(has(txt, "KOFFIE VOOR IEDEREEN"), txt)
+    var trimmed = txt.trim()
+    var cry = "KOFFIE VOOR IEDEREEN"
+    assert(trimmed.length >= cry.length, trimmed)
+    assert(trimmed.substring(trimmed.length - cry.length, trimmed.length) == cry, "battle cry is not the last line:\n" + trimmed)
+    stopLm("pl-kof")
+    stopResearch("pl-kof")
+}
+
+test "kof: a kofbank post does NOT inherit the Kof signature" {
+    prepare("pl-kofbank")
+    File(workDir("pl-kofbank") + "/company.kofmd").writeText(newsOnlyCompany())
+    startResearch("pl-kofbank", "12152", "normal")
+    startLmMode("pl-kofbank", "12153", "kofbanknosign")
+    var p = advPlan("pl-kofbank", "12152", "12153", "normal", "plan --company company.kofmd --store pub.db")
+    assert(has(outOf(p), "1 proposta(s) em REVIEW"), p)
+    var db = workDir("pl-kofbank") + "/pub.db"
+    var dump = runCmd("python3 -c \"import sqlite3;print(sqlite3.connect('" + db + "').execute('select content from publication').fetchone()[0])\"")
+    var txt = outOf(dump)
+    assert(!has(txt, "KOFFIE VOOR IEDEREEN"), "kofbank must not carry the Kof battle cry:\n" + txt)
+    assert(!has(txt, "koflang.github.io"), txt)
+    stopLm("pl-kofbank")
+    stopResearch("pl-kofbank")
+}
+
+test "plan: an unused observation candidate is not refused by shared boilerplate" {
+    prepare("pl-rejpool")
+    // Every `reject` candidate carried the SAME boilerplate
+    // ("observacao sobre um padrao que a autora recusa: ...") plus the reject a
+    // second time, so UNRELATED rejects scored 47-53% against each other and the
+    // whole 18:00 slot refused itself — no observation post went out
+    // (measured 2026-10-12). The comparison must use the subject alone.
+    var c = "# company\nname: Adversarial\n\n# topics\ntopics:\n  - engenharia de software\n\n# rejects\nrejects:\n"
+    c = c + "  - usar uma noticia so como gancho para uma opiniao que nao tem relacao com ela\n"
+    c = c + "  - engajamento pedido no fim do texto\n"
+    c = c + "  - hashtag no fim do texto para alcance\n\n"
+    c = c + "# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\ntarget: linkedin\n\n"
+    c = c + "# editorial\nrequire_material: true\nresearch_max_age_hours: 168\n\n"
+    c = c + "# category night\nclock: 18:00\nlabel: observacao\nfunction: observacao\nangle: observacao sobre engenharia\n"
+    File(workDir("pl-rejpool") + "/company.kofmd").writeText(c)
+    startResearch("pl-rejpool", "12160", "normal")
+    startLmMode("pl-rejpool", "12161", "newsvary")
+    var p = advPlan("pl-rejpool", "12160", "12161", "normal", "plan --company company.kofmd --store pub.db")
+    var out = outOf(p)
+    assert(!has(out, "recusado(s) por repeticao com pauta recente"), out)
+    assert(has(out, "1 proposta(s) em REVIEW"), out)
+    stopLm("pl-rejpool")
+    stopResearch("pl-rejpool")
+}
+
+test "repo: the noun 'compilador' is not a claim that the build ran" {
+    prepare("pl-compiler")
+    File(workDir("pl-compiler") + "/company.kofmd").writeText(advCompany())
+    startGithubFixture("pl-compiler", "12170", "normal")
+    startResearch("pl-compiler", "12171", "normal")
+    startLmMode("pl-compiler", "12172", "compilernoun")
+    var g = runCmd("cd '" + workDir("pl-compiler") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-compiler") + "/home' KOF_GITHUB_API=http://127.0.0.1:12170 java -cp '" + classpath() + "' Default.Main github --limit 10 --company company.kofmd --store pub.db")
+    assert(exitOf(g) == 0, g)
+    stopGithubFixture("pl-compiler")
+    var p = advPlan("pl-compiler", "12171", "12172", "normal", "plan --company company.kofmd --store pub.db")
+    var out = outOf(p)
+    // "disciplina de compilador" is not "o codigo compila". The check must match
+    // whole tokens, or a careful post is discarded for a claim it never made.
+    assert(!has(out, "o texto afirma que a verificacao aconteceu"), out)
+    assert(has(out, "1 proposta(s) em REVIEW"), out)
+    stopLm("pl-compiler")
+    stopResearch("pl-compiler")
+}
+
+test "news: a post that admits it has only the headline is rejected" {
+    prepare("pl-headlineonly")
+    File(workDir("pl-headlineonly") + "/company.kofmd").writeText(newsOnlyCompany())
+    // The source published real CONTENT, so the candidate reaches generation;
+    // what is under test is the DRAFT, which restates the headline and admits
+    // it cannot verify anything (the author rejected exactly this on
+    // 2026-10-13).
+    startResearch("pl-headlineonly", "12180", "substance")
+    startLmMode("pl-headlineonly", "12181", "headlineonly")
+    var p = advPlan("pl-headlineonly", "12180", "12181", "normal", "plan --company company.kofmd --store pub.db")
+    var out = outOf(p)
+    assert(has(out, "admite que nao tem nada alem da manchete"), out)
+    assert(has(out, "0 proposta(s) em REVIEW"), out)
+    stopLm("pl-headlineonly")
+    stopResearch("pl-headlineonly")
+}
+
+test "news: a headline-only item never becomes a candidate" {
+    prepare("pl-headlinepool")
+    File(workDir("pl-headlinepool") + "/company.kofmd").writeText(newsOnlyCompany())
+    // "titleonly" answers an item with NO description at all: extent "titulo".
+    // A news post needs something the source published about the item, so the
+    // slot must be honestly EMPTY instead of writing from the headline.
+    startResearch("pl-headlinepool", "12182", "titleonly")
+    startLmMode("pl-headlinepool", "12183", "distinct")
+    var p = advPlan("pl-headlinepool", "12182", "12183", "titleonly", "plan --company company.kofmd --store pub.db")
+    var out = outOf(p)
+    assert(has(out, "CONTEUDO legivel"), out)
+    assert(has(out, "1 horario(s) sem material"), out)
+    stopLm("pl-headlinepool")
+    stopResearch("pl-headlinepool")
+}
+
+test "plan: a subject in cooldown is not chosen again, even with a new argument" {
+    prepare("pl-subject")
+    // Three opinions: TWO are about IA (different arguments) and one is not.
+    // The thesis gate sees the two IA ones as different (different words), so
+    // without a SUBJECT level the slot keeps returning to AI — the author's
+    // complaint ("nao da pra ficar falando de ia todo dia"). With the cooldown,
+    // run 1 takes one IA opinion and run 2 must take the NON-IA one.
+    var c = "# company\nname: Adversarial\n\n# topics\ntopics:\n  - engenharia de software\n\n# opinions\nopinions:\n"
+    c = c + "  - usa IA no dia a dia e gosta, mas detesta terceirizar raciocinio\n"
+    c = c + "  - nao gasta token quando o problema tem solucao deterministica\n"
+    c = c + "  - prefere complexidade justificada a complexidade de moda\n\n"
+    c = c + "# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\ntarget: linkedin\n\n"
+    c = c + "# editorial\nrequire_material: true\nsubjects:\n"
+    c = c + "  - ia: IA, llm, modelo, tokens\n"
+    c = c + "  - arquitetura: arquitetura, complexidade, microsservico\n\n"
+    c = c + "# category afternoon\nclock: 15:00\nlabel: contraponto\nfunction: contraponto\nangle: discorde do hype\n"
+    File(workDir("pl-subject") + "/company.kofmd").writeText(c)
+    startResearch("pl-subject", "12190", "normal")
+    startLmMode("pl-subject", "12191", "newsvary")
+
+    var p1 = advPlan("pl-subject", "12190", "12191", "normal", "plan --company company.kofmd --store pub.db")
+    assert(has(outOf(p1), "tema: usa IA no dia a dia"), outOf(p1))
+
+    var p2 = advPlan("pl-subject", "12190", "12191", "normal", "plan --company company.kofmd --store pub.db")
+    var out2 = outOf(p2)
+    // The slot must NOT return to the IA subject: run 1 already used an IA
+    // opinion, so run 2 takes the NON-IA one instead.
+    assert(has(out2, "tema: prefere complexidade justificada"), out2)
+    assert(!has(out2, "tema: usa IA no dia a dia"), out2)
+    assert(!has(out2, "tema: nao gasta token"), out2)
+    // and the refusal is stated, so the reasoning is visible
+    assert(has(out2, "assunto 'ia' em cooldown"), out2)
+    stopLm("pl-subject")
+    stopResearch("pl-subject")
+}

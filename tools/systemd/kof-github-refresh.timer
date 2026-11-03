@@ -1,0 +1,12 @@
+[Unit]
+Description=KOF publisher - refresh do GitHub diario 05:30 (antes do slot das 06:00)
+
+[Timer]
+OnCalendar=*-*-* 05:30:00
+# Se a maquina estava desligada na hora, roda assim que ligar — o slot das
+# 06:00 nao pode encontrar a base vazia.
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

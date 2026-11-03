@@ -115,6 +115,12 @@ entity TopicRecord {
     validation: String
     caveat: String
     related_topics: String
+    // The THESIS SIGNATURE of this pauta (see src/Thesis.kf): the folded,
+    // stopword-stripped content words of theme+argument. Stored so a later run
+    // can compare THESES rather than prose, which is what the lexical memory
+    // could not do. Appended LAST so existing constructor calls keep their
+    // positional arguments.
+    thesis_signature: String
 }
 
 // A source actually CONSULTED while researching a pauta. `published_at` is the
@@ -125,6 +131,22 @@ entity TopicRecord {
 // The unique key is `id` = topic_id + "::" + url_key, not `url_key` alone: the
 // same article can legitimately back two different pautas, and a url-only key
 // would silently drop the second citation.
+// One row per post READ on the author's enois profile. This is the ledger that
+// answers "is this new?" — the publisher never re-shares a post it already
+// handled, and a restarted daemon picks up exactly where it stopped. `status`
+// is "shared" (published to LinkedIn), "skipped" (no readable text — nothing
+// honest to caption) or "failed" (the target refused); only "shared" is
+// terminal, so a failed share is retried on the next poll.
+entity EnoisSeen {
+    id: String unique
+    created_at: String
+    seen_at: String
+    status: String
+    publication_id: String
+    url: String
+    detail: String
+}
+
 entity SourceRef {
     id: String unique
     topic_id: String
@@ -136,6 +158,14 @@ entity SourceRef {
     fetched_at: String
     summary: String
     source_type: String
+    // STRUCTURED TRACEABILITY (spec §3). `extent` records HOW MUCH of the item
+    // was actually obtained — "titulo" (only the headline), "metadados" (title,
+    // url, dates and a score, no content) or "resumo" (the source published a
+    // blurb that was read). `excerpt` is that obtained text, so a later audit
+    // can see exactly what grounded the post instead of trusting the summary
+    // line. Appended LAST so existing constructor calls keep their arguments.
+    extent: String
+    excerpt: String
 }
 
 List<String> daysList(Schedule s) {
@@ -223,6 +253,7 @@ class Store {
         orm.create<RepoState>(conn)
         orm.create<TopicRecord>(conn)
         orm.create<SourceRef>(conn)
+        orm.create<EnoisSeen>(conn)
         migrateSchema()
     }
 
@@ -238,6 +269,23 @@ class Store {
     Int migrateSchema() {
         if (!hasColumn("publication", "topic_id")) {
             orm.migrate(conn, "001-publication-topic-id", "ALTER TABLE publication ADD COLUMN topic_id VARCHAR(255)")
+        }
+        // Semantic memory (src/Thesis.kf). A legacy database has topicrecords
+        // without the column; CREATE TABLE IF NOT EXISTS never alters it, so the
+        // ALTER is required. Existing rows keep an EMPTY signature, which the
+        // comparison treats as "unknown" — the run is not silently exempted, it
+        // is simply unable to compare what was never recorded.
+        if (!hasColumn("topicrecord", "thesis_signature")) {
+            orm.migrate(conn, "002-topicrecord-thesis-signature", "ALTER TABLE topicrecord ADD COLUMN thesis_signature VARCHAR(255)")
+        }
+        // Structured traceability on sources (spec §3): how much was obtained
+        // and the obtained text. Legacy rows get empty values, which the report
+        // reads as "extent not recorded" rather than guessing a level.
+        if (!hasColumn("sourceref", "extent")) {
+            orm.migrate(conn, "003-sourceref-extent", "ALTER TABLE sourceref ADD COLUMN extent VARCHAR(255)")
+        }
+        if (!hasColumn("sourceref", "excerpt")) {
+            orm.migrate(conn, "004-sourceref-excerpt", "ALTER TABLE sourceref ADD COLUMN excerpt VARCHAR(255)")
         }
         return 0
     }
@@ -278,6 +326,25 @@ class Store {
 
     publicationsByStatus(String status): List<Publication> {
         return orm.where<Publication>(conn, "status", status)
+    }
+
+    // ---- enois mirror ledger ----
+
+    allEnoisSeen(): List<EnoisSeen> {
+        return orm.all<EnoisSeen>(conn)
+    }
+
+    enoisSeenById(String id): EnoisSeen? {
+        var rows = orm.where<EnoisSeen>(conn, "id", id)
+        if (rows.size() == 0) {
+            return null
+        }
+        return rows.get(0)
+    }
+
+    saveEnoisSeen(e: EnoisSeen): Int {
+        orm.save(conn, e)
+        return 0
     }
 
     byOccurrenceKey(String key): Publication? {
@@ -399,6 +466,22 @@ class Store {
         return orm.all<Occurrence>(conn)
     }
 
+    // How many occurrences a schedule already produced on a given DAY
+    // ("2026-10-13"). Occurrence ids are "<schedule>@<iso>", so the day prefix
+    // is an exact, cheap filter. Used by the daemon's bounded retry: a slot that
+    // did not manage to post gets another attempt later the same day, but only
+    // up to `publisher.retry.max` times.
+    Int occurrencesForDay(String scheduleName, String dayPrefix) {
+        var prefix = scheduleName + "@" + dayPrefix
+        var n = 0
+        for (var o in orm.all<Occurrence>(conn)) {
+            if (o.id().startsWith(prefix)) {
+                n = n + 1
+            }
+        }
+        return n
+    }
+
     // ---- repo knowledge (GitHub source, incremental) ----
 
     Int saveRepoState(RepoState r) {
@@ -473,6 +556,23 @@ class Store {
 
     Int deleteTopic(String id): Bool {
         return orm.delete<TopicRecord>(conn, id)
+    }
+
+    // Recent pautas that carry a thesis signature, newest first. Used by the
+    // semantic gate: comparing against pautas (not publications) is what lets
+    // the check run BEFORE generation, as the spec requires.
+    List<TopicRecord> recentTopicSignatures(Int limit): List<TopicRecord> {
+        var rows = orm.all<TopicRecord>(conn)
+        var out = listOf<TopicRecord>()
+        var i = rows.size() - 1
+        while (i >= 0 && out.size() < limit) {
+            var t = rows.get(i)
+            if (t.thesis_signature() != "") {
+                out.add(t)
+            }
+            i = i - 1
+        }
+        return out
     }
 
     // Delete ONE publication row by id. Used only by the explicit re-plan path

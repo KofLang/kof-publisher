@@ -9,11 +9,19 @@ The reply is chosen by the REQUEST CONTENT so one fixture can play every
 role the pipeline needs (generate -> post text, discover -> topic list).
 It is a TEST FIXTURE: the Kof side talks real HTTP to it (kof.http +
 kof.json) -- no Kof code is stubbed.
+
+FAULT MODES (3rd argv): `timeout` sleeps past the client deadline and then
+closes the connection without answering, reproducing the real failure measured
+on 2026-11-02 (infer.flatt.com.br timed out, and the non-String exception that
+arrived killed the whole daemon); `garbage` answers a body that is not JSON.
 """
 import json
 import re
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+MODE = "normal"
 
 POST_TEXT = (
     "Migrar um sistema legado comecou por um mapa de dependencias gerado a "
@@ -34,6 +42,17 @@ def pick_reply(prompt: str) -> str:
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _maybe_fault(self) -> bool:
+        """True when the fault was delivered and the request is done."""
+        if MODE == "timeout":
+            time.sleep(12)
+            self.close_connection = True
+            return True
+        if MODE == "garbage":
+            self._json(b"java.net.http.HttpTimeoutException: request timed out")
+            return True
+        return False
+
     def _json(self, payload: bytes) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -52,6 +71,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/api/chat":
             self.send_response(404)
             self.end_headers()
+            return
+        if self._maybe_fault():
             return
         n = int(self.headers.get("Content-Length", "0"))
         req = json.loads(self.rfile.read(n) or b"{}")
@@ -72,5 +93,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 2:
+        MODE = sys.argv[2]
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 11555
     HTTPServer(("127.0.0.1", port), Handler).serve_forever()

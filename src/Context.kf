@@ -84,12 +84,28 @@ record Company(
     List<String> thinking,
     List<String> argumentation,
     List<String> rejects,
-    List<String> evidenceRules)
+    List<String> evidenceRules,
+    // PRIMARY-source feeds (# editorial research_feeds). Appended at the end so
+    // the existing positional constructor call keeps its arguments in place.
+    List<String> researchFeeds,
+    // SUBJECT taxonomy (# editorial subjects): "nome: palavra1, palavra2".
+    // A recurring subject (IA, arquitetura, legado...) is what "nao da para
+    // falar disso todo dia" is about — a level ABOVE the thesis. Two posts can
+    // argue different things and still be the same subject, which is exactly
+    // what the thesis comparison cannot see. Declared in the profile so the
+    // author owns the taxonomy instead of the code guessing it.
+    List<String> subjects)
 
 // Explicit GitHub source config (# github section). The account is NEVER
 // guessed: it must be declared, because the org name is not the author's
 // personal account (acceptance §2.1).
-record GithubConfig(String account, List<String> orgs, List<String> include, Bool enabled)
+record GithubConfig(String account, List<String> orgs, List<String> include, Bool enabled,
+    // Forks the author actively develops. The blanket fork rule exists to skip
+    // third-party code; a fork she pushes to is her own work, so declaring it
+    // here is an explicit override that does NOT restrict the rest of the set
+    // (which is what `include` would do). Appended LAST so existing positional
+    // constructor calls keep their arguments in place.
+    List<String> ownForks)
 
 // One editorial category (a daily slot's ORIENTATION, not a hard template):
 //   # category morning
@@ -438,7 +454,7 @@ GithubConfig githubConfigOf(List<Section> secs) {
     if (account == "" && orgs.size() == 0) {
         enabled = false
     }
-    return GithubConfig(account, orgs, include, enabled)
+    return GithubConfig(account, orgs, include, enabled, sectionList(secs, "github", "own_forks"))
 }
 
 // Parse a company .md (KofMD) file into the editorial model. Honest String
@@ -548,7 +564,9 @@ Company loadCompany(String path) {
         globalList(secs, "thinking"),
         globalList(secs, "argumentation"),
         globalList(secs, "rejects"),
-        globalList(secs, "evidence"))
+        globalList(secs, "evidence"),
+        sectionList(secs, "editorial", "research_feeds"),
+        sectionList(secs, "editorial", "subjects"))
 }
 
 KofmdSchema? findSchema(List<KofmdSchema> schemas, String name) {
