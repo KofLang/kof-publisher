@@ -346,7 +346,7 @@ LM: estilo `openai` autodetectado quando a URL contém `/v1` (beta-llm;
 `reasoning_effort=none` senão o thinking come o budget), Ollama caso
 contrário (`"think":false` por default pelo mesmo motivo).
 
-## Testes — 128/128 verdes (kof instalado 0.5.0-beta e dev-jar)
+## Testes — 129/129 verdes (kof instalado 0.5.0-beta e dev-jar)
 
 ```bash
 rm -rf build/classes && kof build src --target jvm
@@ -360,7 +360,7 @@ kof test tests/KofLab.kf --target jvm --timeout 260      # 4  fatos da lab+skip+
 kof test tests/Personal.kf --target jvm --timeout 260    # 4  perfil pessoal: plan/categorias/repeticao/material
 kof test tests/Identity.kf --target jvm --timeout 260    # 7  identidade: fatos/opinioes no prompt, avoid, episodio inventado, alegacao de leitura, acao em primeira pessoa
 kof test tests/Github.kf --target jvm --timeout 300      # 12 github: evidencia/cache/sanitizacao/falha honesta
-kof test tests/Service.kf --target jvm --timeout 600     # 8  start/stop/status (sem duplicata, preserva estado, daemon pesquisa, retentativa, geracao antecipada, falha do LM nao derruba o processo)
+kof test tests/Service.kf --target jvm --timeout 600     # 9  start/stop/status (sem duplicata, preserva estado, daemon pesquisa, retentativa, geracao antecipada, falha do LM nao derruba o processo e o horario e retentado ate publicar)
 kof test tests/Targets.kf --target jvm --timeout 300     # 4  fronteira de publicacao (stub local; assisted nunca chama a API; autonomo+perfil pessoal publica 1x e nao persiste o token)
 kof test tests/Research.kf --target jvm --timeout 200    # 12 pesquisa online + retencao/migracao do banco
 kof test src/Enois.kf --target jvm                       # 7  cliente do enois (url publica, html->texto, entidades, espacos, css/script)

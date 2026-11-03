@@ -512,6 +512,24 @@ String cliFixturesFault(String name, String rsPort, String lmPort, String args) 
     return r.stdout + "||EXIT=" + r.exitCode
 }
 
+// Same wiring as cliFixturesFault, but with a SHORT same-day retry delay so the
+// retry of a failed slot happens inside the test window.
+String cliFixturesFlaky(String name, String rsPort, String lmPort, String args) {
+    var base = "http://127.0.0.1:" + rsPort
+    var cmd = "cd '" + workDir(name) + "' && KOF_PUBLISHER_HOME='" + workDir(name) + "/home'"
+        + " KOF_RESEARCH_HN_API='" + base + "/hn'"
+        + " KOF_RESEARCH_DEVTO_API='" + base + "/devto'"
+        + " KOF_RESEARCH_LOBSTERS_API='" + base + "/lobsters'"
+        + " KOF_RESEARCH_TIMEOUT=10"
+        + " KOF_PUBLISHER_RETRY_MAX=3"
+        + " KOF_PUBLISHER_RETRY_DELAY_MIN=1"
+        + " KOF_PUBLISHER_PREP_LEAD_MIN=0"
+        + " KOF_LM_URL=http://127.0.0.1:" + lmPort + " KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=5"
+        + " timeout 60 java -cp '" + classpath() + "' Default.Main " + args + " 2>&1"
+    var r = process.run("sh", "-c", cmd)
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
 // REGRESSÃO 2026-11-02: o daemon MORREU às 11:54 no meio do dia.
 //
 // O LM estourou o timeout e a excecao chegou como algo que nao e String. O
@@ -570,4 +588,58 @@ test "service: an LM failure skips the slot and never kills the daemon" {
     forceCleanup("svc-lmdown")
     runCmd("kill $(cat '" + workDir("svc-lmdown") + "/lm.pid') 2>/dev/null || true")
     stopResearch("svc-lmdown")
+}
+
+// REGRESSÃO 2026-11-02 (segunda metade): sobreviver NAO basta — o horario tem de
+// ser RETENTADO e o post tem de SAIR.
+//
+// O primeiro teste prova que uma falha de LM nao mata o processo. Faltava o que
+// o autor de fato pediu: "ele tem que retentar e publicar corretamente". A
+// fixture `flaky` falha SO na primeira geracao e responde normalmente depois. A
+// falha acontece DEPOIS da hora do slot (o retry ja venceu), que e o caso que
+// antes era abandonado com "sem espaco para nova tentativa" — o slot so voltava
+// no dia seguinte. Aqui a retentativa tem de rodar e a publicacao tem de sair.
+test "service: a slot whose LM failed is retried and actually publishes" {
+    runCmd("for p in $(pgrep -f 'Default.Main daemo[n]'); do d=$(readlink /proc/$p/cwd 2>/dev/null); if [ \"$d\" = '" + workDir("svc-flaky") + "' ]; then kill -9 $p 2>/dev/null || true; fi; done; true")
+    prepare("svc-flaky")
+    File(workDir("svc-flaky") + "/company.kofmd").writeText(autonomousCompany())
+    startResearch("svc-flaky", "11978", "normal")
+    runCmd("pkill -f 'fake_lm_serv[e]r.py 11979' || true; true")
+    var up = runCmd("{ python3 '" + publisherDir() + "/tests/fake_lm_server.py' 11979 flaky > '" + workDir("svc-flaky") + "/lm.log' 2>&1 & echo $! > '" + workDir("svc-flaky") + "/lm.pid'; }; sleep 1; curl -s -m 4 http://127.0.0.1:11979/api/tags | grep -c models")
+    assert(exitOf(up) == 0 && outOf(up).trim() == "1", up)
+
+    // Retentativa curta (1 min) e sem adiantamento, para o teste caber no tempo
+    // e para a falha cair FORA da janela de prep (o caso antes abandonado).
+    var sync = cliFixturesFlaky("svc-flaky", "11978", "11979", "sync --company company.kofmd --store pub.db")
+    assert(exitOf(sync) == 0, sync)
+    // Slot ~1 min no futuro, com HH:MM == clock. O daemon roda a ocorrencia
+    // imediatamente (o retry ja venceu) e a primeira geracao falha.
+    runCmd("python3 -c \"import sqlite3,datetime; tz=datetime.timezone(datetime.timedelta(hours=-3)); now=datetime.datetime.now(tz); t=(now+datetime.timedelta(seconds=40)).replace(second=0,microsecond=0); t=t+datetime.timedelta(minutes=1) if (t-now).total_seconds()<15 else t; iso=t.strftime('%Y-%m-%dT%H:%M:%S-03:00'); clk=t.strftime('%H:%M'); c=sqlite3.connect('" + workDir("svc-flaky") + "/pub.db'); c.execute(\\\"update schedule set next_execution=?, clock=? where name='noon'\\\", (iso,clk)); c.commit()\"")
+
+    var s = cliFixturesFlaky("svc-flaky", "11978", "11979", "start --company company.kofmd --store pub.db")
+    assert(exitOf(s) == 0, s)
+
+    var logPath = workDir("svc-flaky") + "/home/publisher.log"
+    var waited = 0
+    var published = ""
+    while (waited < 240000) {
+        published = runCmd("python3 -c \"import sqlite3; c=sqlite3.connect('" + workDir("svc-flaky") + "/pub.db'); r=c.execute(\\\"select status from publication\\\").fetchone(); print(r[0] if r else '')\"")
+        if (has(outOf(published), "published")) {
+            break
+        }
+        runCmd("sleep 3")
+        waited = waited + 3000
+    }
+    var log = runCmd("cat '" + logPath + "' 2>/dev/null")
+    assert(!has(outOf(log), "publisher: error"), "o processo morreu no meio do dia:\n" + outOf(log))
+    assert(has(outOf(log), "request failed") || has(outOf(log), "no response from"), "a falha do LM nao apareceu no log:\n" + outOf(log))
+    assert(has(outOf(log), "nova tentativa em"), "o horario nao foi reagendado para retentativa:\n" + outOf(log))
+    // O QUE IMPORTA: apos a falha, a retentativa publicou de verdade.
+    assert(has(outOf(published), "published"), "a retentativa NAO publicou (estado: " + outOf(published) + "):\n" + outOf(log))
+
+    var stop = cliFixturesFlaky("svc-flaky", "11978", "11979", "stop")
+    assert(exitOf(stop) == 0, stop)
+    forceCleanup("svc-flaky")
+    runCmd("kill $(cat '" + workDir("svc-flaky") + "/lm.pid') 2>/dev/null || true")
+    stopResearch("svc-flaky")
 }

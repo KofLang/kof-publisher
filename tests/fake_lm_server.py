@@ -13,7 +13,10 @@ kof.json) -- no Kof code is stubbed.
 FAULT MODES (3rd argv): `timeout` sleeps past the client deadline and then
 closes the connection without answering, reproducing the real failure measured
 on 2026-11-02 (infer.flatt.com.br timed out, and the non-String exception that
-arrived killed the whole daemon); `garbage` answers a body that is not JSON.
+arrived killed the whole daemon); `garbage` answers a body that is not JSON;
+`flaky` fails the FIRST generation request only and answers the rest normally,
+so a test can prove the daemon RETRIES the slot and actually publishes instead
+of merely surviving.
 """
 import json
 import re
@@ -22,6 +25,10 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MODE = "normal"
+# Only consulted by MODE == "flaky": how many generation requests were seen so
+# far. `discover` (topic proposals) is NOT a generation and never consumes the
+# fault, so the first GENERATION is the one that fails.
+GENERATIONS = 0
 
 POST_TEXT = (
     "Migrar um sistema legado comecou por um mapa de dependencias gerado a "
@@ -72,13 +79,22 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
-        if self._maybe_fault():
-            return
         n = int(self.headers.get("Content-Length", "0"))
         req = json.loads(self.rfile.read(n) or b"{}")
         text = ""
         for msg in req.get("messages", []):
             text += msg.get("content", "") + "\n"
+        # `flaky` only trips on a GENERATION, and only the first one.
+        if MODE == "flaky" and "descobridor de pautas" not in text.lower() \
+                and "responda apenas com a lista" not in text.lower():
+            global GENERATIONS
+            GENERATIONS += 1
+            if GENERATIONS == 1:
+                time.sleep(12)
+                self.close_connection = True
+                return
+        if self._maybe_fault():
+            return
         resp = {
             "model": req.get("model", "fake-lm"),
             "created_at": "2026-01-01T00:00:00Z",

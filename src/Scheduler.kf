@@ -147,13 +147,16 @@ class Scheduler {
             return ""
         }
         var retryAt = isoOf(sp)
-        // The retry must still fit before the occurrence (prep window) or before
-        // the next slot (after the hour).
-        var limit = nextSlot
-        if (millisUntil(occIso) > 0) {
-            limit = occIso
-        }
-        if (limit != "" && millisUntil(retryAt) >= millisUntil(limit)) {
+        // O limite da retentativa e o PROXIMO horario, nao a hora deste slot.
+        //
+        // Uma retentativa que cai alguns minutos DEPOIS da hora ainda salva o
+        // post — publicar atrasado e muito melhor do que perder o horario do dia
+        // inteiro. Antes, qualquer instante acima da hora era descartado com
+        // "sem espaco para nova tentativa" e o slot so voltava no dia seguinte:
+        // era assim que o daemon "sobrevivia" a uma falha de LM sem publicar
+        // (medido 2026-11-02). Passado o proximo horario, ele roda de qualquer
+        // forma e passaria por cima desta retentativa.
+        if (nextSlot != "" && millisUntil(retryAt) >= millisUntil(nextSlot)) {
             return ""
         }
         return retryAt
