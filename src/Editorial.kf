@@ -655,42 +655,536 @@ String joinList(List<String> items) {
     return out
 }
 
-String systemRules() {
-    var s = "Voce e o agente editorial de uma empresa. Escreva UMA publicacao para LinkedIn."
-    s = s + " Maximo 1300 caracteres. Sem hashtag."
-    s = s + " NAO use: 'No mundo de hoje', 'Estamos vivendo uma revolucao', 'A tecnologia esta transformando'."
-    s = s + " Sem clickbait, sem frases motivacionais vazias, sem afirmacao sem evidencia, sem excesso de emoji."
-    s = s + " Escreva como um humano tecnico e direto. NUNCA mencione que o texto foi gerado por IA."
-    return s
+// The profile without `# personality`. This is NOT a personality: it is the
+// pre-2026-11 behaviour written down as data, so the code carries no author's
+// text and an old profile keeps producing exactly what it produced before.
+// `publisher check` prints `emotional_profile=fallback:...` for it.
+Profile fallbackProfile(String path) {
+    return Profile(false, listOf<String>(), listOf<String>(), listOf<String>(), path,
+        "", "", "",
+        listOf<ToneLevel>(), listOf<EmotionState>(), listOf<String>(), listOf<Domain>(),
+        // industryPositions, teachingPositions, projects, engineQuestions,
+        // engineAvoidForms, formats, memoryAspects, signaturePhrases,
+        // expressionBanks, rhythmRules, clicheStructures, notLike,
+        // strongLanguageRules
+        listOf<String>(), listOf<String>(), listOf<String>(),
+        listOf<String>(), listOf<String>(), listOf<String>(),
+        listOf<String>(), listOf<String>(), listOf<String>(),
+        listOf<String>(), listOf<String>(), listOf<String>(),
+        listOf<String>(),
+        4,
+        // reviewChecks, reviewNeutralizeForbidden, restrictions, signatureMotifs
+        listOf<String>(), listOf<String>(), listOf<String>(), listOf<String>(),
+        "", "", "",
+        listOf<String>("emotional_profile=fallback:sem # personality"))
 }
 
-// Voice rules for a specific company: base + tone + the author's style
-// guide (`guide:` list in the KofMD). The guide is NOT decoration — validate()
-// hard-rejects the mechanical rules from it (em-dash, CTA cliches).
-String voiceRules(Company company) {
-    var s = systemRules()
-    if (company.tone() != "") {
-        s = s + " TOM OBRIGATORIO: " + company.tone()
+// Where the checks that live in the CODE come from when the profile does not
+// declare its own. Same five axes as `# review checks` in an authored profile.
+List<String> fallbackReviewChecks() {
+    return listOf<String>(
+        "autenticidade: nada de experiencia vivida, projeto ou numero que o material nao sustenta",
+        "profundidade: o texto tem uma tese e a desenvolve, nao fica na superficie",
+        "linguagem: voz natural de conversa, sem linguagem corporativa nem formula pronta",
+        "diversidade: nao repete estrutura, abertura nem conclusao de publicacoes recentes",
+        "honestidade: nao afirma mais do que o material demonstra")
+}
+
+// Identity blocks the profile is missing. Reported, never invented: the
+// persona is built only from what the author declared.
+List<String> personaGaps(Profile pr) {
+    var gaps = listOf<String>()
+    if (pr.background().size() == 0) {
+        gaps.add("background")
     }
+    if (pr.values().size() == 0) {
+        gaps.add("values")
+    }
+    if (pr.personality().size() == 0) {
+        gaps.add("personality")
+    }
+    if (pr.states().size() == 0) {
+        gaps.add("emotional_profile.states")
+    }
+    if (pr.domains().size() == 0) {
+        gaps.add("technical_domains")
+    }
+    return gaps
+}
+
+// The SYSTEM prompt: who is writing, before any of the day's material.
+//
+// This is the change the whole personality work rests on. The old
+// systemRules() said "Voce e o agente editorial de uma empresa" and then
+// "Maximo 1300 caracteres. Sem hashtag." — a corporate agent with a hardcoded
+// size that contradicted the profile's own `max_chars: 3000`, addressing the
+// author in the third person under headings like «REGRA DA AUTORA». The model
+// was never told WHO was writing; it was told what not to do, and it complied
+// by writing something safe and generic. Here the identity comes FIRST and the
+// limits come last, and the limits are read from the profile instead of
+// hardcoded.
+String identityRules(Company company) {
+    var pr = company.profile()
+    var sections = listOf<String>()
+    if (!pr.authored()) {
+        // Pre-personality profile: same three sentences the agent used to get.
+        var s = "Voce e o agente editorial de " + company.name() + ". Escreva UMA publicacao para LinkedIn."
+        s = s + " NAO use: 'No mundo de hoje', 'Estamos vivendo uma revolucao', 'A tecnologia esta transformando'."
+        s = s + " Sem clickbait, sem frases motivacionais vazias, sem afirmacao sem evidencia, sem excesso de emoji."
+        s = s + " Escreva como um humano tecnico e direto. NUNCA mencione que o texto foi gerado por IA."
+        sections.add(s)
+        var g = 0
+        while (g < company.guide().size() && g < 28) {
+            sections.add("REGRA DA AUTORA: " + company.guide().get(g))
+            g = g + 1
+        }
+        return joinParagraphs(sections)
+    }
+
+    sections.add("Voce ESCREVE COMO " + company.name() + ", e o texto abaixo e a sua propria vida e a sua propria cabeca, nao um personagem que voce interpreta. Nao e o 'agente editorial' de ninguem: e a autora escrevendo.")
+    if (pr.background().size() > 0) {
+        sections.add("QUEM VOCE E (fatos da sua trajetoria):\n" + bulletList(pr.background()))
+    }
+    if (pr.values().size() > 0) {
+        sections.add("O QUE VOCE VALORIZA (e por isso se emociona, se irrita e escolhe os assuntos):\n" + bulletList(pr.values()))
+    }
+    if (pr.personality().size() > 0) {
+        sections.add("COMO VOCE E (personalidade e contradicoes; as contradicoes sao suas, nao facetas a esconder):\n" + bulletList(pr.personality()))
+    }
+    if (pr.toneLevels().size() > 0) {
+        var ladder = ""
+        for (var l in pr.toneLevels()) {
+            ladder = ladder + "- nivel " + l.level() + " (" + l.name() + "): " + l.direction() + "\n"
+        }
+        sections.add("SUA INTENSIDADE EMOCIONAL VAI DE 0 A 5. A diretiva de cada texto traz o nivel ja calculado (e o que o disparou) e voce escreve NAQUELE nivel, nem acima nem abaixo. A emocao nao vem do assunto so: vem do que o assunto fere ou confirma em quem voce e.\n" + ladder)
+    }
+    if (pr.states().size() > 0) {
+        var st = ""
+        for (var e in pr.states()) {
+            st = st + "- " + e.name() + " (base " + e.level() + ") quando: " + joinList(e.triggers()) + "\n"
+        }
+        sections.add("O QUE LEVANTA CADA ESTADO (a emocao nasce destes gatilhos, nunca de uma escolha de estilo):\n" + st)
+    }
+    if (pr.emotionRules().size() > 0) {
+        sections.add("REGRAS DA SUA EMOCAO:\n" + bulletList(pr.emotionRules()))
+    }
+    if (pr.domains().size() > 0) {
+        var ds = ""
+        for (var d in pr.domains()) {
+            ds = ds + "- " + d.name() + " (base " + d.level() + "): seu angulo: " + d.angle() + "\n"
+        }
+        sections.add("SEUS DOMINIOS TECNICOS E O ANGULO QUE VOCE TEM EM CADA UM (a base indica onde voce fala com propriedade; onde nao e dominio seu, voce pergunta em vez de afirmar):\n" + ds)
+    }
+    if (pr.industryPositions().size() > 0) {
+        sections.add("SUAS POSICOES SOBRE A INDUSTRIA:\n" + bulletList(pr.industryPositions()))
+    }
+    if (pr.teachingPositions().size() > 0) {
+        sections.add("SUAS POSICOES SOBRE ENSINO E COMUNIDADE:\n" + bulletList(pr.teachingPositions()))
+    }
+    if (pr.projects().size() > 0) {
+        sections.add("SEUS PROJETOS (fale deles com o que o material sustenta, nunca com entusiasmo que o commit nao justifica):\n" + bulletList(pr.projects()))
+    }
+    var ofL = listOf<String>()
+    if (pr.expressionBanks().size() > 0) {
+        ofL.add("expressoes que fazem parte da sua fala: " + joinList(pr.expressionBanks()) + " (nao force: use quando cabe)")
+    }
+    if (pr.rhythmRules().size() > 0) {
+        ofL.add("ritmo: " + joinList(pr.rhythmRules()))
+    }
+    if (pr.notLike().size() > 0) {
+        ofL.add("como voce NAO escreve: " + joinList(pr.notLike()))
+    }
+    if (ofL.size() > 0) {
+        sections.add("SUA FALA:\n" + bulletList(ofL))
+    }
+    var guides = listOf<String>()
+    var g2 = 0
+    while (g2 < company.guide().size() && g2 < 28) {
+        guides.add(company.guide().get(g2))
+        g2 = g2 + 1
+    }
+    if (guides.size() > 0) {
+        sections.add("REGRAS DE ESCRITA QUE VOCE MESMA DECLAROU:\n" + bulletList(guides))
+    }
+    if (pr.strongLanguageRules().size() > 0) {
+        sections.add("LINGUAGEM FORTE: so a partir do nivel " + pr.strongLevels() + " de intensidade, e so quando a emocao pedir; acima disso nao e coragem, e barulho.\n" + bulletList(pr.strongLanguageRules()))
+    }
+    if (pr.clicheStructures().size() > 0) {
+        sections.add("ESTRUTURAS QUE VOCE NUNCA USA (sao o contrario da sua voz; o texto e reprovado por elas):\n" + bulletList(pr.clicheStructures()))
+    }
+    if (pr.signatureMotifs().size() > 0) {
+        sections.add("O QUE VOCE SEMPRE NOTA (o seu angulo em qualquer assunto, do mais empolgado ao mais tecnico; nao e bordao, e o criterio com que voce olha):\n" + bulletList(pr.signatureMotifs()))
+    }
+    if (pr.restrictions().size() > 0) {
+        sections.add("RESTRICOES:\n" + bulletList(pr.restrictions()))
+    }
+    if (pr.platformLinkedin() != "") {
+        sections.add("ONDE VOCE ESTA ESCREVENDO: LinkedIn. " + pr.platformLinkedin())
+    }
+    if (company.authenticity().size() > 0) {
+        sections.add("O QUE VOCE NAO INVENTA:\n" + bulletList(company.authenticity()))
+    }
+    var checks = pr.reviewChecks()
+    if (checks.size() == 0) {
+        checks = fallbackReviewChecks()
+    }
+    sections.add("ANTES DE ENTREGAR, reveja o texto contra isto (se algo falhar, reescreva antes de responder):\n" + bulletList(checks))
+    if (pr.reviewNeutralizeForbidden().size() > 0) {
+        sections.add("Na revisao, voce NAO pode neutralizar a sua voz:\n" + bulletList(pr.reviewNeutralizeForbidden()))
+    }
+    return joinParagraphs(sections)
+}
+
+// ---- EDITORIAL FRAME: emotion and format, WITHOUT a model call ----
+//
+// The mission's central rule is that emotion is born from a value, not from a
+// style flag. Mechanically that has to be a DERIVATION: the subject touches a
+// domain (and maybe one of the state triggers the profile declares), the
+// slot's function says what the text is FOR, and the profile says what
+// intensity and which format that combination carries. Everything here is
+// data from the profile; the code only picks among the declared options, so
+// the log can say WHY a post was written angry or calm.
+
+Bool textMentions(String hay, String word) {
+    var h = " " + strings.toSnakeCase(asciiFold(hay)) + " "
+    var w = strings.toSnakeCase(asciiFold(word))
+    if (w == "") {
+        return false
+    }
+    return h.indexOf(w) >= 0
+}
+
+// The influencer openers the mission names as "not forbidden words, but not an
+// involuntary signature". Kept in the CODE because they are a property of the
+// genre, not of this author: any profile written for LinkedIn needs them.
+List<String> influencerOpeners() {
+    return listOf<String>(
+        "recentemente",
+        "tenho pensado",
+        "uma coisa que aprendi",
+        "no desenvolvimento",
+        "trabalhando em",
+        "cada vez mais",
+        "e interessante perceber",
+        "fiquei pensando",
+        "no final das contas",
+        "seguimos construindo",
+        "que venha o proximo desafio")
+}
+
+// Words that carry no subject. A pauta made only of these has nothing to say,
+// whatever the slot; anything else is a subject the profile can be angry or
+// curious about. Used by reasonToExist, never as a length rule.
+List<String> topicFiller() {
+    return listOf<String>(
+        "que", "e", "eh", "o", "a", "os", "as", "um", "uma", "uns", "umas",
+        "de", "do", "da", "dos", "das", "em", "no", "na", "nos", "nas",
+        "para", "pra", "por", "com", "sem", "sobre", "ao", "aos", "seu", "sua",
+        "isso", "isto", "aquilo", "este", "esta", "esse", "essa", "ele", "ela",
+        "meu", "minha", "muito", "mais", "menos", "como", "quando", "onde",
+        "porque", "tem", "ha", "ser", "sao")
+}
+
+// Does the text use a declared cliche STRUCTURE? The profile writes them with
+// `X`/`Y` as the variable parts ("nao e sobre X, e sobre Y"), so the check is
+// "the literal fragments appear, in order, with anything between them" — which
+// is what makes it catch the formula and not just one wording of it.
+String clicheHit(String text, String cliche) {
+    var norm = " " + strings.toSnakeCase(asciiFold(text)) + " "
+    var parts = listOf<String>()
+    var cur = ""
     var i = 0
-    while (i < company.guide().size() && i < 28) {
-        s = s + "\nREGRA DA AUTORA: " + company.guide().get(i)
+    while (i < cliche.length) {
+        var c = cliche.charAt(i)
+        if (c == 88 || c == 89) {
+            if (cur.trim() != "") {
+                parts.add(strings.toSnakeCase(asciiFold(cur.trim())))
+            }
+            cur = ""
+        } else {
+            cur = cur + cliche.substring(i, i + 1)
+        }
         i = i + 1
     }
-    if (company.guide().size() > 0) {
-        s = s + "\nRegras mecanicas inegociaveis do validador: NUNCA use travessao (\u2014); nao termine com CTA generico; nao use frases de coach; NAO use hashtag."
+    if (cur.trim() != "") {
+        parts.add(strings.toSnakeCase(asciiFold(cur.trim())))
     }
+    if (parts.size() == 0) {
+        return ""
+    }
+    var at = 0
+    for (var p in parts) {
+        var idx = norm.indexOf(p, at)
+        if (idx < 0) {
+            return ""
+        }
+        at = idx + p.length
+    }
+    return cliche
+}
+
+// Which of the profile's formats fits the slot's function. The profile owns
+// BOTH lists, so this is a mapping, not a choice made up by the code.
+String functionFormats(String function) {
+    if (function == "projetos") {
+        return "relato, bastidor, conquista, hardware, linux, arquitetura"
+    }
+    if (function == "noticias") {
+        return "descoberta, analise, explicacao, mercado"
+    }
+    if (function == "contraponto") {
+        return "critica, opiniao, provocacao, comparacao"
+    }
+    return "reflexao, humor, pergunta, frustracao"
+}
+
+// First index in `formats` that the slot's function allows. The function's
+// preference list is a comma-separated String; the profile's formats are a
+// LIST, so they are compared item by item (joining them first and splitting on
+// a comma silently matched nothing — measured on the first sample run, where
+// every directive came out without a format).
+Int formatIndex(List<String> formats, String wanted) {
+    for (var f in wanted.split(",")) {
+        var t = f.trim()
+        if (t == "") {
+            continue
+        }
+        var i = 0
+        for (var g in formats) {
+            if (g == t) {
+                return i
+            }
+            i = i + 1
+        }
+    }
+    return -1
+}
+
+// `seed` makes the choice deterministic per publication (the topic + slot),
+// not random per call: the same pauta always gets the same format, and two
+// slots on the same day step through different ones.
+String pickFormat(List<String> formats, String function, String seed) {
+    var wanted = functionFormats(function)
+    var idx = formatIndex(formats, wanted)
+    if (idx < 0) {
+        return ""
+    }
+    var n = 0
+    for (var c in foldForMemory(seed).split(" ")) {
+        n = n + c.length
+    }
+    return formats.get((idx + n) % formats.size())
+}
+
+// Does the text carry one of the declared motifs? "Carry" cannot mean "repeat
+// the sentence": the motif is a stance the model must express in its own
+// words, so matching is by the motif's distinctive terms (the long, contentful
+// ones), and two of them in the text is enough to say the angle is present.
+// Deliberately generous — this check exists to make ABSENCE visible, not to
+// demand a phrase. Returns the motif found, or "".
+String motifInText(String text, List<String> motifs) {
+    for (var m in motifs) {
+        var hits = 0
+        var seen = listOf<String>()
+        for (var w in strings.toSnakeCase(foldForMemory(m)).split("_")) {
+            if (w.length < 6 || topicFiller().contains(w) || seen.contains(w)) {
+                continue
+            }
+            seen.add(w)
+            if (textMentions(text, w)) {
+                hits = hits + 1
+            }
+        }
+        if (hits >= 2) {
+            return m
+        }
+    }
+    return ""
+}
+
+// Which of the author's signature motifs enters this post. Deterministic per
+// pauta + slot, like the format, so the same subject always carries the same
+// angle and consecutive slots step through different ones instead of leaning
+// on one favourite. Empty when the profile declares no motifs (legacy).
+String pickMotif(List<String> motifs, String seed) {
+    if (motifs.size() == 0) {
+        return ""
+    }
+    var n = 0
+    for (var c in foldForMemory(seed).split(" ")) {
+        n = n + c.length
+    }
+    return motifs.get(n % motifs.size())
+}
+
+// What the post should do with the emotion, in the profile's own terms.
+String slotEmotion(String function) {
+    if (function == "projetos") {
+        return "satisfacao"
+    }
+    if (function == "noticias") {
+        return "curiosidade"
+    }
+    if (function == "contraponto") {
+        return "irritacao"
+    }
+    return "humor"
+}
+
+// Quality of the relation between a subject and the author's declared
+// domains: 2 when a domain is named in the subject, 1 when a word of the
+// domain's angle shows up in the material, 0 when it is a neighbour subject.
+Int domainMatch(Domain d, String material) {
+    if (textMentions(material, d.name())) {
+        return 2
+    }
+    var hits = 0
+    for (var w in foldForMemory(d.angle()).split(" ")) {
+        if (w.length >= 5 && textMentions(material, w)) {
+            hits = hits + 1
+        }
+    }
+    if (hits >= 2) {
+        return 1
+    }
+    return 0
+}
+
+// Compute the frame of one post. `function` empty = legacy caller: the
+// domain/state derivation still runs, the function-specific floor does not.
+EditorialFrame editorialFrameOf(Company company, String topic, String function, String seed) {
+    var pr = company.profile()
+    var material = topic
+    var best = Domain("", 0, "")
+    var bestQ = 0
+    for (var d in pr.domains()) {
+        var q = domainMatch(d, material)
+        if (q > bestQ) {
+            bestQ = q
+            best = d
+        }
+    }
+    var emotion = ""
+    var level = best.level()
+    for (var e in pr.states()) {
+        for (var t in e.triggers()) {
+            if (t != "" && textMentions(material, t)) {
+                emotion = e.name()
+                if (e.level() > level) {
+                    level = e.level()
+                }
+            }
+        }
+    }
+    if (emotion == "") {
+        emotion = slotEmotion(function)
+    }
+    // A subject outside every declared domain gets no baseline and no
+    // trigger: it is approached from the VALUE, which the persona carries.
+    //
+    // The slot's BASE emotion is a floor, not a decoration. A contraponto that
+    // derives "irritacao, level 0" is a contradiction the model would resolve
+    // by writing neutral text and calling it a critique — measured on the first
+    // sample run: the anti-hype slot came out at level 0. When the state named
+    // by the slot exists in the profile, its declared base is the minimum the
+    // slot starts from. A TRIGGERED state above that still wins.
+    var slotState = slotEmotion(function)
+    for (var e2 in pr.states()) {
+        if (e2.name() == slotState && e2.level() > level) {
+            level = e2.level()
+        }
+    }
+    if (level > 5) {
+        level = 5
+    }
+    var format = ""
+    if (pr.formats().size() > 0) {
+        format = pickFormat(pr.formats(), function, material + "|" + seed)
+    }
+    var motif = pickMotif(pr.signatureMotifs(), material + "|" + function + "|" + seed)
+    return EditorialFrame(best.name(), best.level(), emotion, level, format, "", "", level == 0, motif)
+}
+
+// The directive block: the ONE place the text's target intensity and shape
+// are stated. It sits in the USER prompt, right before the topic, so the model
+// reads it after the material and writes to it — not as a filter applied to a
+// finished text.
+String directiveOf(Company company, EditorialFrame fr, String function) {
+    var pr = company.profile()
+    var b = "DIRETIVA EDITORIAL DESTA PUBLICACAO (calculada do perfil, nao e sugestao):\n"
+    if (fr.domain() != "") {
+        b = b + "- dominio: " + fr.domain() + " (base " + fr.baseLevel() + ")\n"
+    } else {
+        b = b + "- dominio: fora dos seus dominios tecnicos — fale pelo que voce valoriza, pergunte em vez de afirmar\n"
+    }
+    var name = toneNameOf(pr.toneLevels(), fr.level())
+    b = b + "- intensidade: " + fr.level()
+    if (name != "") {
+        b = b + " (" + name + ")"
+    }
+    b = b + "\n"
+    var dir = toneDirectionOf(pr.toneLevels(), fr.level())
+    if (dir != "") {
+        b = b + "- o que muda no texto neste nivel: " + dir + "\n"
+    }
+    b = b + "- emocao dominante: " + fr.emotion() + " — ela precisa nascer do que o assunto toca em voce, nao ser anunciada\n"
+    if (fr.level() < pr.strongLevels()) {
+        b = b + "- linguagem forte: NAO neste nivel (a partir do nivel " + pr.strongLevels() + ")\n"
+    } else {
+        b = b + "- linguagem forte: permitida se a emocao pedir; se nao pedir, nao use\n"
+    }
+    if (fr.format() != "") {
+        b = b + "- formato desta vez: " + fr.format() + "\n"
+    }
+    if (function != "") {
+        b = b + "- funcao do horario: " + function + " (" + functionFormats(function) + ")\n"
+    }
+    if (fr.neutral()) {
+        b = b + "- nivel 0: aqui o texto e tecnico e direto. Emocao zero de proposito, nao texto apagado.\n"
+    }
+    // The signature motif is the ONE thing that is present at every level,
+    // including 0. Without it a level-0 post is technically correct and
+    // anonymous: it could have been written by anyone who read the same
+    // article. The motif is the author's angle on the subject, not a slogan
+    // and not an episode, so it survives the "no invented experience" rule.
+    if (fr.motif() != "") {
+        b = b + "- o seu angulo nesta publicacao (o que voce sempre nota, em qualquer assunto): " + fr.motif() + "\n"
+        b = b + "  Esse angulo precisa aparecer no texto como criterio ou observacao sua, nao como frase de efeito colada no fim. No nivel 0 ele e o que faz o texto ser seu: o assunto e tecnico, o olhar e seu.\n"
+    }
+    return b
+}
+
+String joinParagraphs(List<String> parts) {
+    var out = ""
+    for (var p in parts) {
+        if (out != "") {
+            out = out + "\n\n"
+        }
+        out = out + p
+    }
+    return out
+}
+
+// `function` is the SLOT's editorial purpose (trabalho|noticia|contraponto|
+// observacao, from # category function). It changes which format and which
+// level are plausible, nothing else.
+String voiceRules(Company company) {
+    return voiceRulesFor(company, "")
+}
+
+String voiceRulesFor(Company company, String function) {
+    var s = identityRules(company)
+    // MECHANICAL LIMITS come last and come from the profile. The old prompt
+    // hardcoded "Maximo 1300 caracteres. Sem hashtag." next to the identity,
+    // contradicting max_chars: 3000. The code now states only what the profile
+    // declares, and states it once.
+    var mech = listOf<String>()
     if (company.maxChars() > 0) {
-        s = s + "\nLIMITE DE TAMANHO: no maximo " + company.maxChars() + " caracteres."
+        mech.add("tamanho: no maximo " + company.maxChars() + " caracteres")
     }
-    // Authenticity rules are HARD prompt constraints (the model must never
-    // invent a lived experience) — they cannot be checked mechanically, so
-    // they live in the prompt and their limits are stated in the report.
-    var k = 0
-    while (k < company.authenticity().size()) {
-        s = s + "\nREGRA DE AUTENTICIDADE: " + company.authenticity().get(k)
-        k = k + 1
-    }
+    mech.add("nunca travessao longo; nunca CTA generico de rede social; nunca frase de coach; nada de hashtag a menos que a autora use")
+    mech.add("nunca mencione que o texto foi gerado por IA; voce escreve publicacao, nao um pedido de interacao")
+    s = s + "\n\nREGRAS MECANICAS DO VALIDADOR (reprovam o texto, sem excecao):\n" + bulletList(mech)
     return s
 }
 
@@ -934,15 +1428,55 @@ class Editorial {
     // appended verbatim to the material brief and carries its own provenance
     // and caveats — the generator never invents beyond it. Empty by default.
     String extraMaterial
+    // The slot's editorial purpose, from `# category function`. It decides
+    // which formats and which base emotion a text may use — it does not
+    // decide the topic.
+    String slotFunction
+    // Extra seed for the format choice. The daemon leaves it empty (the topic
+    // and the slot already make the choice stable); `samples` sets it per
+    // sample so repeated samples of the same pauta show different formats.
+    String seed
+    // The directive computed for the LAST generation (see `directiveLine`), so
+    // the caller can print it and the author can see why the post sounds the
+    // way it does.
+    String lastDirective
 
     constructor(Company company) {
         this.company = company
         this.extraMaterial = ""
+        this.slotFunction = ""
+        this.seed = ""
+        this.lastDirective = ""
+    }
+
+    Editorial withSeed(String s) {
+        this.seed = s
+        return this
     }
 
     Editorial withExtra(String text) {
         this.extraMaterial = text
         return this
+    }
+
+    Editorial withFunction(String function) {
+        this.slotFunction = function
+        return this
+    }
+
+    String frameLine(EditorialFrame fr) {
+        var s = "DIRETIVA: dominio=" + firstNonEmpty(fr.domain(), "fora dos dominios") + " base=" + fr.baseLevel()
+        s = s + " emocao=" + fr.emotion() + " nivel=" + fr.level()
+        if (fr.format() != "") {
+            s = s + " formato=" + fr.format()
+        }
+        if (slotFunction != "") {
+            s = s + " funcao=" + slotFunction
+        }
+        if (fr.motif() != "") {
+            s = s + "\nDIRETIVA> angulo proprio: " + strings.truncate(fr.motif(), 90)
+        }
+        return s
     }
 
     // ---- 1. CONTEXT ----
@@ -1009,6 +1543,41 @@ class Editorial {
     }
 
     String generateIn(String topic, List<String> recent, String objective, String categoryLabel, String categoryAngle) {
+        return generateFrame(topic, recent, objective, categoryLabel, categoryAngle, slotFunction)
+    }
+
+    // Editorial ENGINE gate: the reason-to-exist check, before any call.
+    //
+    // Throws SKIP with a specific reason when the pauta has no reason to exist
+    // — the profile's `editorial_engine.questions` are the same question set,
+    // and a pauta that cannot answer the first two is not a post, it is a slot
+    // being filled. This is deliberately blunt: the mission prefers NO post to
+    // a post without a reason.
+    String reasonToExist(String topic, String objective) {
+        var t = topic.trim()
+        if (t == "") {
+            throw "SKIP: pauta vazia — nao ha post a escrever"
+        }
+        // The gate is "there is a subject here", not "the subject is long
+        // enough". Counting substantive words refused real pautas: "sistemas
+        // legados", "backend", "JVM" are subjects with a body to them, and a
+        // word count cannot tell them from filler. What filler looks like is a
+        // topic made ONLY of connectives ("que e sobre isso"), so that is what
+        // is refused. Emotion and angle come from the profile, not from length.
+        var real = false
+        for (var w in strings.toSnakeCase(foldForMemory(t)).split("_")) {
+            if (w != "" && !topicFiller().contains(w)) {
+                real = true
+            }
+        }
+        if (!real) {
+            throw "SKIP: pauta sem assunto ('" + t + "') — nao ha post a escrever"
+        }
+        return ""
+    }
+
+    String generateFrame(String topic, List<String> recent, String objective, String categoryLabel, String categoryAngle, String function) {
+        reasonToExist(topic, objective)
         if (company.requireMaterial() && !hasMaterial(company)) {
             throw "SKIP: sem material editorial suficiente (sem topicos, opinioes ou fatos registrados) — nada gerado, nada inventado"
         }
@@ -1038,6 +1607,27 @@ class Editorial {
         if (objective != "") {
             p = p + "OBJETIVO DO CONTEUDO: " + objective + "\n"
         }
+        // The persona prompt says "this is your own life", and a model reads
+        // that as licence to narrate a week of work. The material of a pauta
+        // is a READ (repository, article, registered position), never a lived
+        // episode, so the licence has to be bounded right where the material
+        // is. Measured on the first real sample run: the projects scenarios
+        // opened with "passei a semana mexendo no parser" and "rodei build",
+        // and the fidelity barrier rejected every one of them.
+        p = p + "NATUREZA DO MATERIAL DESTA PAUTA: o que esta acima e leitura, posicao registrada ou noticia de terceiro — nao e um dia seu. Voce pode afirmar o que o material mostra, o que voce pensa sobre ele e o que a sua experiencia de engenharia permite concluir. Voce NAO pode narrar um episodio seu que o material nao registra: nada de 'passei a semana', 'hoje eu', 'rodei o build', 'implementei', 'testei', 'no meu time aconteceu'. Tambem nao encene um encontro com o material: 'peguei o projeto de volta', 'o que me chamou atencao', 'me fez parar e reler' descrevem um contato fisico com algo que voce apenas leu. Diga o que o material mostra e o que voce conclui dele, sem a cena do encontro. Se a pauta e um commit, escreva sobre o commit; se e uma posicao, escreva a partir da posicao; se e uma noticia, escreva sobre a noticia. A voz em primeira pessoa continua, mas ela fala do que voce pensa, nao de um dia inventado.\n"
+        // The editorial engine: the questions the post has to be able to
+        // answer. They are the profile's, and they are asked BEFORE writing so
+        // the text is built around a reason instead of decorated after.
+        var pr = company.profile()
+        if (pr.engineQuestions().size() > 0) {
+            p = p + "ANTES DE ESCREVER, responda mentalmente a estas perguntas. Se a pauta nao responde as duas primeiras, NAO escreva: responda apenas 'SKIP: <motivo>'.\n" + bulletList(pr.engineQuestions())
+        }
+        if (pr.engineAvoidForms().size() > 0) {
+            p = p + "FORMAS QUE ESTA PAUTA NAO PODE TOMAR:\n" + bulletList(pr.engineAvoidForms())
+        }
+        var fr = editorialFrameOf(company, topic, function, categoryLabel + "|" + seed)
+        lastDirective = frameLine(fr)
+        p = p + directiveOf(company, fr, function)
         if (recent.size() > 0) {
             p = p + "JA PUBLICADO (nao repita assunto/argumento/estrutura/comeco/conclusao/CTA):\n"
             var i = 0
@@ -1047,11 +1637,17 @@ class Editorial {
             }
         }
         p = p + "Escreva a publicacao agora. Responda APENAS com o texto final."
-        var r = lmComplete(voiceRules(company), p)
+        var r = lmComplete(voiceRulesFor(company, function), p)
         if (!r.ok()) {
             throw "generate: " + r.error()
         }
-        return cleanDraft(r.text())
+        var out = cleanDraft(r.text())
+        // The engine gate is also enforced on the OUTPUT: a model that answers
+        // "SKIP: ..." instead of writing is obeying, not failing.
+        if (out.startsWith("SKIP:")) {
+            throw out
+        }
+        return out
     }
 
     // ---- TOPIC DISCOVERY (acceptance §4) ----
@@ -1119,6 +1715,72 @@ class Editorial {
         }
         if (norm.contains("voce_ja_parou") || norm.contains("no_mundo_atual") || norm.contains("em_um_cenario")) {
             problems.add("abertura artificial banida")
+        }
+        // The profile's own cliche list. These are STRUCTURES, not words: the
+        // "nao e sobre X, e sobre Y" formula is the single most common way a
+        // post sounds like a LinkedIn post instead of like a person, and the
+        // author declared it forbidden. Matched on the folded text with the
+        // variable parts as wildcards.
+        var pr = company.profile()
+        for (var cl in pr.clicheStructures()) {
+            var hit = clicheHit(text, cl)
+            if (hit != "") {
+                problems.add("estrutura cliche que a autora proibe: '" + cl + "'")
+            }
+        }
+        // Signature phrases are hers, but a phrase repeated in every post stops
+        // being a voice and becomes a tic. Cap: at most one per post, and none
+        // if the same one appeared in the recent memory.
+        var sigUsed = 0
+        for (var sp in pr.signaturePhrases()) {
+            if (sp != "" && textMentions(text, sp)) {
+                sigUsed = sigUsed + 1
+                for (var prev in recent) {
+                    if (textMentions(recentContent(prev), sp)) {
+                        warnings.add("frase-assinatura repetida em publicacao recente: '" + sp + "'")
+                    }
+                }
+            }
+        }
+        if (sigUsed > 1) {
+            warnings.add("mais de uma frase-assinatura no mesmo texto (" + sigUsed + ") — vira tique")
+        }
+        // The signature motif: every post should carry the author's angle, at
+        // every intensity, INCLUDING level 0. A warning and not a problem,
+        // because the motif is a stance and a validator can only see words:
+        // it notices absence, it cannot judge whether a rewording carried the
+        // same thought. The prompt and the samples are where this is really
+        // judged; this check makes the absence visible instead of silent.
+        var motifs = pr.signatureMotifs()
+        if (motifs.size() > 0) {
+            var carried = motifInText(text, motifs)
+            if (carried == "") {
+                warnings.add("nenhum angulo proprio da autora no texto — o post pode ter saido generico, mesmo estando correto")
+            } else {
+                for (var prev in recent) {
+                    if (motifInText(recentContent(prev), listOf<String>(carried)) != "") {
+                        warnings.add("o mesmo angulo da autora ja apareceu em publicacao recente: '" + strings.truncate(carried, 60) + "' — varie o criterio, nao a bandeira")
+                    }
+                }
+            }
+        }
+        // Influencer openers. The mission is explicit that these are not
+        // forbidden words — they are forbidden as an INVOLUNTARY SIGNATURE, so
+        // one occurrence is a warning and a repeat across posts is a problem.
+        for (var mu in influencerOpeners()) {
+            if (textMentions(text, mu)) {
+                var repeated = false
+                for (var prev in recent) {
+                    if (textMentions(recentContent(prev), mu)) {
+                        repeated = true
+                    }
+                }
+                if (repeated) {
+                    problems.add("muleta de influenciador repetida em publicacao recente: '" + mu + "'")
+                } else {
+                    warnings.add("muleta de influenciador: '" + mu + "' — nao pode virar assinatura")
+                }
+            }
         }
         var colons = text.split(":").length - 1
         if (colons > 2) {
@@ -1213,8 +1875,18 @@ class Editorial {
         marks.add("o texto completo")
         marks.add("depois de ler o")
         for (var m in marks) {
-            if (norm.indexOf(strings.toSnakeCase(asciiFold(m))) >= 0) {
-                return m
+            var needle = strings.toSnakeCase(asciiFold(m))
+            var at = norm.indexOf(needle)
+            while (at >= 0) {
+                // A DENIED reading is not a claim to have read. The real
+                // sample of 2026-11-07 said "ainda estou so na leitura do
+                // titulo e do resumo, SEM mergulhar no texto completo" — the
+                // most honest sentence in the draft — and the check flagged
+                // "o texto completo" as a claim to have read it.
+                if (!negatedBefore(norm, at)) {
+                    return m
+                }
+                at = norm.indexOf(needle, at + 1)
             }
         }
         return ""
@@ -1450,11 +2122,37 @@ class Editorial {
         marks.add("reescrevi")
         for (var m in marks) {
             var needle = "_" + strings.toSnakeCase(asciiFold(m)) + "_"
-            if (norm.indexOf(needle) >= 0) {
-                return m
+            var at = norm.indexOf(needle)
+            while (at >= 0) {
+                // A DENIED action is not a claim. "sem falar de build ou de
+                // teste que eu NAO rodei aqui" is the opposite of claiming to
+                // have run it, and flagging it punished the most honest
+                // sentence in the draft (measured on the real sample run of
+                // 2026-11-07). Only the words right before the verb count, so
+                // a negation elsewhere in the sentence does not excuse it.
+                if (!negatedBefore(norm, at)) {
+                    return m
+                }
+                at = norm.indexOf(needle, at + 1)
             }
         }
         return ""
+    }
+
+    // Is the verb at `at` preceded by a negation in the same clause? Looks at
+    // the ~24 characters before it, stopping at a clause boundary.
+    Bool negatedBefore(String norm, Int at) {
+        var start = at - 24
+        if (start < 0) {
+            start = 0
+        }
+        var win = norm.substring(start, at)
+        for (var n in listOf<String>("_nao_", "_nem_", "_nunca_", "_jamais_", "_sem_")) {
+            if (win.indexOf(n) >= 0) {
+                return true
+            }
+        }
+        return false
     }
 
     // A phrase that reports the CONTENT of a source (as opposed to using its
@@ -1463,14 +2161,29 @@ class Editorial {
         var norm = " " + strings.toSnakeCase(asciiFold(text)) + " "
         var claims = listOf<String>()
         claims.add("nos comentarios")
-        claims.add("os comentarios")
+        // "os comentarios" alone is a generic noun: "a maioria dos comentarios
+        // sobre compilador novo ignora isso" is a statement about the genre,
+        // not a report of what a consulted thread said (measured on the real
+        // sample run of 2026-11-07). Only the forms that point AT the source
+        // count.
+        claims.add("os comentarios do artigo")
+        claims.add("os comentarios da thread")
+        claims.add("os comentarios do post")
         claims.add("na discussao do artigo")
         claims.add("a discussao nos comentarios")
         claims.add("o artigo diz")
         claims.add("o artigo mostra")
         claims.add("o artigo defende")
         claims.add("segundo o artigo")
-        claims.add("a thread")
+        // "a thread" alone is not a claim about a source: "com virtual threads
+        // a conta muda" is a technical statement, and the bare noun flagged it
+        // as reporting a discussion nobody read (measured on the real sample
+        // run of 2026-11-07). Only the reporting forms count.
+        claims.add("na thread")
+        claims.add("a thread diz")
+        claims.add("a thread mostra")
+        claims.add("a thread discute")
+        claims.add("a thread argumenta")
         claims.add("o autor do post")
         claims.add("o post diz")
         claims.add("o post defende")
@@ -1746,6 +2459,10 @@ class Editorial {
     }
 
     String reviseIn(String draft, Validation v, List<String> recent, String categoryLabel, String categoryAngle) {
+        return reviseFrame(draft, v, recent, categoryLabel, categoryAngle, slotFunction)
+    }
+
+    String reviseFrame(String draft, Validation v, List<String> recent, String categoryLabel, String categoryAngle, String function) {
         var p = contextBrief()
         p = p + materialBrief(company)
         if (extraMaterial != "") {
@@ -1758,6 +2475,11 @@ class Editorial {
         if (categoryAngle != "") {
             p = p + "ANGULO DESTE HORARIO: " + categoryAngle + "\n"
         }
+        // The SAME directive the draft was written to. A revision that loses
+        // the intensity is the neutralization the mission forbids: the text
+        // gets safer and stops being hers.
+        var fr = editorialFrameOf(company, draft, function, categoryLabel + "|" + seed)
+        p = p + directiveOf(company, fr, function)
         if (recent.size() > 0) {
             p = p + "JA PUBLICADO (nao repita comeco/conclusao/argumento):\n"
             var i = 0
@@ -1766,7 +2488,9 @@ class Editorial {
                 i = i + 1
             }
         }
-        p = p + "TEXTO ANTERIOR:\n" + draft + "\n\nCORRIJA estes problemas e reescreva a publicacao completa:\n"
+        p = p + "TEXTO ANTERIOR:\n" + draft + "\n\n"
+        p = p + "Corrija APENAS o que os problemas abaixo apontam. Mantenha a voz, a intensidade emocional e o ponto de vista: a correcao nao pode amaciar o texto, nao pode virar texto neutro de manual e nao pode trocar a sua opiniao por uma versao equilibrada que nao diz nada.\n"
+        p = p + "PROBLEMAS A CORRIGIR:\n"
         for (var prob in v.problems()) {
             p = p + "- " + prob + "\n"
         }
@@ -1777,7 +2501,7 @@ class Editorial {
             p = p + "- (aviso) " + warn + "\n"
         }
         p = p + "Responda APENAS com o texto final corrigido."
-        var r = lmComplete(voiceRules(company), p)
+        var r = lmComplete(voiceRulesFor(company, function), p)
         if (!r.ok()) {
             throw "revise: " + r.error()
         }

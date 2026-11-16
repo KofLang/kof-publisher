@@ -132,9 +132,15 @@ def repos_for(mode):
     return own
 
 
-def org_repos(mode):
+def org_repos(mode, owner=""):
     if mode in ("org", "empty", "fail", "unknown", "noncontrib"):
         return []
+    # Two orgs, DIFFERENT repos, so a test can prove the publisher reads both
+    # and does not stop at the first one. KofLang pushed longer ago than
+    # Rede-ENois on purpose: with an ordered store the later push must sort
+    # first, and a test can assert that instead of trusting insertion order.
+    if owner.lower() == "rede-enois":
+        return [repo("Rede-ENois/enois-backend", "enois backend", "Java", iso_ago(6.0000))]
     return [repo("KofLang/kof4j", "Kof for the JVM", "Java", iso_ago(411.0000))]
 
 
@@ -191,7 +197,7 @@ class Handler(BaseHTTPRequestHandler):
                 if owner != ACCOUNT:
                     return self._json([])
                 return self._json(repos_for(mode))
-            return self._json(org_repos(mode))
+            return self._json(org_repos(mode, owner))
 
         # /repos/<owner>/<name>/contributors
         m = re.fullmatch(r"/repos/([^/]+)/([^/]+)/contributors", path)

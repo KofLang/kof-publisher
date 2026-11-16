@@ -1,0 +1,199 @@
+# Cenarios de personalidade — entrada do comando `samples`
+
+Um cenario por secao. `function` e a funcao editorial do horario (projetos,
+noticias, contraponto, observacao), `topic` e a pauta, `material` e material
+adicional vindo de fonte publica (tratado como dado nao confiavel), e
+`objective` e opcional.
+
+Este arquivo NAO publica nada e NAO grava nada: ele alimenta
+`kof publisher samples --scenarios examples/amostras.kofmd --runs N`, que
+gera as amostras, mostra a diretiva calculada e imprime o veredito da
+validacao deterministica. E o teste defitivo e HUMANO: ler as amostras.
+
+## 1. Conquista real de projeto
+
+# scenario conquista
+function: projetos
+topic: o kofbank ganhou o parser de copybook reescrito com tabela declarada no lugar de offsets
+material: FATO DO REPOSITORIO: o commit troca a leitura por offset por uma tabela de layout declarada em codigo de configuracao. NAO houve build nem teste executado nesta analise; o que se sabe e o que o diff e o README mostram.
+objective: trabalho real, sem inflar o que o commit mostra
+
+## 2. Implementacao que funcionou
+
+# scenario implementacao
+function: projetos
+topic: o pool de conexoes customizado saiu do servico de cobranca em favor de uma conexao por tarefa com virtual threads
+material: FATO DO REPOSITORIO: o diff remove a classe de pool customizado e passa a abrir conexao por tarefa. Nenhum benchmark foi executado aqui.
+objective: explicar a decisao e o que ela muda, sem inventar numero
+
+## 3. Critica de arquitetura
+
+# scenario critica-arquitetura
+function: contraponto
+topic: arquitetura a base de microsservico demais e um problema de organizacao disfarcado de decisao tecnica
+material: POSICAO REGISTRADA DA AUTORA: limite entre componentes, custo de simplificar e de distribuir sem necessidade.
+objective: critica com argumento, nao provocacao vazia
+
+## 4. Opiniao sobre IA
+
+# scenario ia
+function: contraponto
+topic: inteligencia artificial generativa resolve a parte mecanica do codigo e deixa intacta a parte que exige julgamento
+material: POSICAO REGISTRADA DA AUTORA: ferramenta util que nao substitui conhecimento, arquitetura nem responsabilidade.
+objective: opiniao propria, com experiencia do dominio e sem hype
+
+## 5. Vibecoding
+
+# scenario vibecoding
+function: contraponto
+topic: quem entrega codigo que nao entende esta terceirizando o raciocinio e vai pagar a conta na manutencao
+objective: critica firme sem humilhar quem esta aprendendo
+
+## 6. Codigo legado
+
+# scenario legado
+function: observacao
+topic: o legado nao e problema tecnico so, e memoria de decisao de gente que ja saiu
+material: POSICAO REGISTRADA DA AUTORA: o que o legado ensina sobre decisao e manutencao, sem romantizar.
+objective: reflexao que nao vira licao de vida
+
+## 7. Java profundo
+
+# scenario java
+function: noticias
+topic: uma mudanca na forma como a JVM trata classloaders em modulo nomeado
+material: FONTE CONSULTADA: titulo sobre mudanca em virtual threads e classloaders na versao atual da JVM. O material e o titulo, nao o texto integral.
+objective: who cares sobre o detalhe, na lente de producao
+
+## 8. Compiladores
+
+# scenario compiladores
+function: noticias
+topic: uma linguagem pequena lancou compilador proprio e o interessante e a escolha de IR que ela fez
+material: FONTE CONSULTADA: anuncio de um compilador para uma linguagem de dominio especifico. Sem o texto integral.
+objective: falar de compilador sem virar propaganda da linguagem
+
+## 9. Linux
+
+# scenario linux
+function: observacao
+topic: o que roda por baixo da interface e continua mais interessante que a interface
+objective: observacao com humor seco, sem guerra de distro
+
+## 10. Hardware antigo
+
+# scenario hardware
+function: projetos
+topic: uma maquina de dez anos voltou a rodar um servico interno e fez o trabalho de um lancamento caro
+material: FATO REGISTRADO: o servico foi movido para a maquina antiga depois de reinicio do servico e ajuste de driver. Nenhum numero de ganho foi medido.
+objective: entusiasmo legitimo sem exagero de numero
+
+## 11. Curso milagroso
+
+# scenario curso
+function: contraponto
+topic: curso de carreira que promete senioridade em tres meses vende atalho que nao existe
+objective: indignacao legitima contra pratica irresponsavel, sem atacar pessoa
+
+## 12. Marketing tecnico
+
+# scenario marketing
+function: contraponto
+topic: anuncio de tecnologia que fala de revolucao e nao diz o que mudou no comportamento
+objective: desconfianca de jargao, com criterio explicito
+
+## 13. Comunidade
+
+# scenario comunidade
+function: observacao
+topic: manter um projeto aberto e trabalho de moderacao antes de ser trabalho de codigo
+objective: gratidao e cansaco misturados de forma proporcionada
+
+## 14. Frustracao
+
+# scenario frustracao
+function: contraponto
+topic: processo que consome o dia inteiro pra decidir o que ja estava decidido
+objective: frustracao sem terminar em licao positiva
+
+## 15. Entusiasmo intenso
+
+# scenario euforia
+function: projetos
+topic: o compilador do Kof passou a compilar o proprio runtime e o bootstrap fecha
+material: FATO DO REPOSITORIO: o log do build mostra a etapa de bootstrap concluida. O README descreve o alvo; o log mostra o que rodou.
+objective: euforia de conquista real, nivel alto justificado
+
+## 16. Tecnico neutro
+
+# scenario neutro
+function: noticias
+topic: uma RFC especifica muda como o header de autenticacao e interpretado por proxies
+material: FONTE CONSULTADA: titulo e resumo da RFC. Nao foi lido o texto integral.
+objective: texto informativo e direto, sem emocao forcada
+
+## 17. Seguranca
+
+# scenario seguranca
+function: contraponto
+topic: seguranca virou enfeite de checklist em vez de responsabilidade de projeto
+objective: critica com conviccao, sem alarmismo
+
+## 18. Enois
+
+# scenario enois
+function: observacao
+topic: a comunidade Enois cresceu e agora tem gente nova querendo entrar e nao sabe por onde
+objective: falar da comunidade dela com pertencimento e sem autopromocao
+
+## 19. Kof
+
+# scenario kof
+function: projetos
+topic: o Kof ganhou verbo nativo de banco e o objetivo e que a linguagem deixe de depender do JDBC na mao
+material: FATO DO REPOSITORIO: existe verbo de banco implementado no runtime e teste no repositorio. O build nao foi executado nesta analise.
+objective: falar do proprio projeto com o que o material sustenta
+
+## 20. Fora de tecnologia
+
+# scenario fora-de-tecnologia
+function: observacao
+topic: consertar uma maquina de moer cafe ensina sobre diagnostico o que livro de metodo nao ensina
+material: Nenhum. Este cenario testa o limite: fora do dominio declarado, a autora fala pelo que valoriza ou nao fala. A cena e HIPOTETICA, nao um episodio vivido: o texto deve falar do que a atividade ensina, nao narrar um conserto que aconteceu.
+objective: testar o limite de honestidade fora do dominio
+
+## 21. Sem relacao com os projetos
+
+# scenario sem-projeto
+function: observacao
+topic: concurso de redacao para criancas e o que ele ensina sobre explicar ideia dificil
+objective: assunto sem relacao com os projetos registrados, sem forcar ligacao
+
+## 22. Informacao insuficiente
+
+# scenario insuficiente
+function: noticias
+topic: isso
+material: FONTE CONSULTADA: sem resumo, sem data.
+objective: testar que a pauta sem assunto nao vira post
+
+## 23. Opiniao forte sem palavrão
+
+# scenario opiniao-forte
+function: contraponto
+topic: testar codigo de terceiro que ninguem vai manter e uma forma cara de achar bug
+objective: conviccao nivel 3 com linguagem intensa e ZERO palavrão
+
+## 24. Palavrao contextualizado
+
+# scenario palavrao
+function: contraponto
+topic: descaso com usuario em incidente de dados pessoais e absurdo e nao merece linguagem diplomática
+objective: nivel alto com linguagem forte permitida, so se a emocao pedir
+
+## 25. Critica firme sem atacar pessoa
+
+# scenario critica-pessoa
+function: contraponto
+topic: o palestrante da conferencia falou de uma pratica que quebra em producao e ele sabe
+objective: criticar a pratica, nunca a pessoa, com argumento tecnico

@@ -374,3 +374,26 @@ test "github: instruction-shaped README text is neutralized as untrusted data" {
     assert(exitOf(marked) == 0 && outOf(marked).trim() != "0", "hostile line reached the prompt unmarked:\n" + marked)
     runCmd("kill $(cat '" + workDir("gh-inject") + "/lm.pid') 2>/dev/null || true")
 }
+
+// The profile that publishes ONLY repository updates declares the two orgs and
+// NO personal account. That is a valid configuration: the personal-account
+// confirmation is skipped (there is no account to confirm) and both orgs are
+// analysed. Without this test the org-only path was only exercised indirectly.
+test "github: an org-only config needs no personal account and reads both orgs" {
+    prepare("gh-orgonly")
+    var c = "# company\nname: Mel Santos\n\n# topics\ntopics:\n  - Java\n\n# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\ntarget: linkedin\n\n# editorial\nrequire_material: true\n\n# github\nenabled: true\norgs:\n  - KofLang\n  - Rede-ENois\n\n# category morning\nclock: 06:00\nlabel: trabalho real e projetos\nfunction: projetos\nangle: o que mudou no projeto\n"
+    File(workDir("gh-orgonly") + "/company.kofmd").writeText(c)
+    startGithub("gh-orgonly", "11930", "normal")
+
+    var g = cli("gh-orgonly", "11930", "github --limit 10 --company company.kofmd --store pub.db")
+    assert(exitOf(g) == 0, g)
+    var out = outOf(g)
+    // no personal confirmation was attempted: the account is empty
+    assert(!has(out, "conta pessoal :"), out)
+    assert(!has(out, "nao confirmada"), out)
+    // both declared orgs were read, each with its own repo
+    assert(has(out, "KofLang/kof4j"), out)
+    assert(has(out, "Rede-ENois/enois-backend"), out)
+    assert(has(out, "2 analisado(s) agora"), out)
+    stopGithub("gh-orgonly")
+}

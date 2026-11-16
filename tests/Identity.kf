@@ -90,7 +90,7 @@ test "identity: the profile loads Mel's declared facts, opinions, principles, to
     var c = cli("id-load", "1", "check --company company.kofmd --store pub.db")
     var out = outOf(c)
     assert(has(out, "Mel Santos"), out)
-    assert(has(out, "schedules    : 4"), out)
+    assert(has(out, "schedules    : 2"), out)
     // the loader does not choke on the identity sections and the github config
     assert(has(out, "timezone     : America/Sao_Paulo"), out)
 }
@@ -101,7 +101,17 @@ test "identity: the material separation and the author's voice reach the prompt"
     assert(exitOf(cp) == 0, cp)
     startLm("id-prompt", "11601", "distinct")
 
-    var p = cli("id-prompt", "11601", "plan --company company.kofmd --store pub.db")
+    // The profile is repository-updates-only, so `plan` has no material until
+    // the org repos are analysed. The fixture supplies one repo per org.
+    runCmd("pkill -f 'fake_githu[b].py 11600' || true; true")
+    var gu = runCmd("{ python3 '" + publisherDir() + "/tests/fake_github.py' 11600 normal > '" + workDir("id-prompt") + "/gh.log' 2>&1 & echo $! > '" + workDir("id-prompt") + "/gh.pid'; }; sleep 1; curl -s -m 4 http://127.0.0.1:11600/health")
+    assert(exitOf(gu) == 0, gu)
+    var gc = "cd '" + workDir("id-prompt") + "' && KOF_PUBLISHER_HOME='" + workDir("id-prompt") + "/home' KOF_GITHUB_API=http://127.0.0.1:11600 java -cp '" + classpath() + "' Default.Main github --limit 10 --company company.kofmd --store pub.db 2>&1"
+    var gr = process.run("sh", "-c", gc)
+    assert(gr.exitCode == 0, gr.stdout)
+    runCmd("kill $(cat '" + workDir("id-prompt") + "/gh.pid') 2>/dev/null || true")
+
+    var p = cli("id-prompt", "11601", "plan --no-research --company company.kofmd --store pub.db")
     assert(exitOf(p) == 0, p)
 
     // the four buckets are separate in the prompt, never merged into one blob
@@ -112,8 +122,13 @@ test "identity: the material separation and the author's voice reach the prompt"
     assert(promptCount("id-prompt", "FONTES DE INFORMACAO") > 0, "sources block missing")
     // the anti-invention rule is a hard constraint in the prompt
     assert(promptCount("id-prompt", "NUNCA invente experiencia pessoal") > 0, "authenticity rule missing")
-    // the author's own guide travels with the request (voice, not a template)
-    assert(promptCount("id-prompt", "REGRA DA AUTORA") > 0, "author guide missing")
+    // the author's own guide travels with the request (voice, not a template).
+    // Since the personality work it is rendered INSIDE the persona, in her own
+    // voice ("regras que voce mesma declarou") instead of as a third-person
+    // block appended after the payload. The old label is gone on purpose; the
+    // guide itself must still be there.
+    assert(promptCount("id-prompt", "REGRAS DE ESCRITA QUE VOCE MESMA DECLAROU") > 0, "author guide missing")
+    assert(promptCount("id-prompt", "texto corrido e a regra mais importante") > 0, "author guide content missing")
     // facts are labelled as facts the source demonstrates, not free invention
     assert(promptCount("id-prompt", "dentro do que a fonte demonstra") > 0, "fact-source caveat missing")
     stopLm("id-prompt")

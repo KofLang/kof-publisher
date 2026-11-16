@@ -156,7 +156,10 @@ test "approve/reject/publish on a missing id fail with a real error" {
 test "generate reports the KofLM outage honestly (no stacktrace)" {
     prepare("gen")
     assert(exitOf(cli("gen", "init --company company.kofmd --store pub.db")) == 0)
-    var g = cliEnv("gen", "KOF_LM_URL=http://127.0.0.1:1 ", "generate --topic backend --company company.kofmd --store pub.db")
+    // The topic needs an actual subject: the editorial engine refuses a bare
+    // keyword ("backend") before the model is ever called, and then the test
+    // would measure the skip message instead of the LM outage.
+    var g = cliEnv("gen", "KOF_LM_URL=http://127.0.0.1:1 ", "generate --topic 'arquitetura de backend em java' --company company.kofmd --store pub.db")
     assert(exitOf(g) != 0, g)
     var out = outOf(g)
     assert(!has(out, "\tat "), out)

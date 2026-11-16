@@ -84,6 +84,27 @@ void stopLm(String name) {
     runCmd("kill $(cat '" + workDir(name) + "/lm.pid') 2>/dev/null || true")
 }
 
+// GitHub fixture: the profile's only material source now. `normal` mode serves
+// one repo per declared org (KofLang/kof4j and Rede-ENois/enois-backend), which
+// is exactly what the two repository-update slots need.
+String startGithub(String name, String port, String mode) {
+    runCmd("pkill -f 'fake_githu[b].py " + port + "' || true; true")
+    var up = runCmd("{ python3 '" + publisherDir() + "/tests/fake_github.py' " + port + " " + mode + " > '" + workDir(name) + "/gh.log' 2>&1 & echo $! > '" + workDir(name) + "/gh.pid'; }; sleep 1; curl -s -m 4 http://127.0.0.1:" + port + "/health")
+    assert(exitOf(up) == 0 && outOf(up).trim() == "ok", up)
+    return outOf(up)
+}
+
+void stopGithub(String name) {
+    runCmd("kill $(cat '" + workDir(name) + "/gh.pid') 2>/dev/null || true")
+}
+
+// `github` needs the fixture URL; the other commands use `cli`.
+String ghCli(String name, String port, String args) {
+    var cmd = "cd '" + workDir(name) + "' && " + base(name) + "KOF_GITHUB_API=http://127.0.0.1:" + port + " java -cp '" + classpath() + "' Default.Main " + args + " 2>&1"
+    var r = process.run("sh", "-c", cmd)
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
 // first "pub-..." id in a `list --status <s>` output
 String firstIdFor(String name, String port, String status) {
     var o = cli(name, port, "list --status " + status + " --company company.kofmd --store pub.db")
@@ -97,32 +118,37 @@ String firstIdFor(String name, String port, String status) {
     throw "no publication with status " + status + " in:\n" + outOf(o)
 }
 
-test "personal: plan prepares one proposal per category, all in REVIEW, nothing published" {
+test "personal: plan prepares one proposal per repository slot, all in REVIEW, nothing published" {
     prepare("personal-plan")
     var cp = runCmd("cp '" + publisherDir() + "/examples/mel.kofmd' '" + workDir("personal-plan") + "/company.kofmd' && mkdir -p '" + workDir("personal-plan") + "/home'")
     assert(exitOf(cp) == 0, cp)
-    startLm("personal-plan", "11581", "distinct")
+    startLm("personal-plan", "11581", "newsvary")
+    // The profile is repository-updates-only now: both slots draw from the
+    // analysed org repos, so the fixture must supply one repo per org before
+    // `plan` has any material.
+    startGithub("personal-plan", "11580", "normal")
+    var g = ghCli("personal-plan", "11580", "github --limit 10 --company company.kofmd --store pub.db")
+    assert(exitOf(g) == 0, g)
+    assert(has(outOf(g), "KofLang/kof4j"), g)
+    assert(has(outOf(g), "Rede-ENois/enois-backend"), g)
+    stopGithub("personal-plan")
 
-    // --no-research: the profile's news slot depends on live sources, which is
-    // a separate test surface. Offline, the projects/contraponto/observacao
-    // slots still run from real material (GitHub digest / registered opinions).
     var p = cli("personal-plan", "11581", "plan --no-research --company company.kofmd --store pub.db")
     assert(exitOf(p) == 0, p)
     var out = outOf(p)
     assert(has(out, "Nada foi publicado"), out)
-    for (var clk in listOf("06:00", "12:00", "15:00", "18:00")) {
+    for (var clk in listOf("06:00", "17:00")) {
         assert(has(out, clk), "missing slot " + clk + ":\n" + out)
     }
-    // the profile's four editorial FUNCTIONS are all represented (the header
-    // prints the function's label, which is what the slot is FOR)
+    // repository updates only: the former news/contraponto/observacao slots are
+    // gone from the profile, and no slot may print their labels
     assert(has(out, "trabalho real e projetos"), out)
-    assert(has(out, "noticia de tecnologia"), out)
-    assert(has(out, "contraponto tecnico"), out)
-    assert(has(out, "observacao, humor e reflexao"), out)
-    // offline, the projects slot (no repo analysed yet) and the news slot (no
-    // live source) both skip and say so instead of inventing material
-    assert(has(out, "trabalho real e projetos]  -> SKIP ----"), out)
-    assert(has(out, "noticia de tecnologia]  -> SKIP ----"), out)
+    assert(!has(out, "noticia de tecnologia"), out)
+    assert(!has(out, "contraponto tecnico"), out)
+    assert(!has(out, "observacao, humor e reflexao"), out)
+    // the two slots take DIFFERENT repos (the planner's repetition gate)
+    assert(has(out, "atualizacao no projeto Rede-ENois/enois-backend"), out)
+    assert(has(out, "atualizacao no projeto KofLang/kof4j"), out)
     assert(has(out, "2 proposta"), out)
 
     var rev = cli("personal-plan", "11581", "list --status review --company company.kofmd --store pub.db")

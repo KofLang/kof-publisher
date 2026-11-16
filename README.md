@@ -76,7 +76,7 @@ entrou na branch `lab` do repositório Kof4j**, na voz da autora:
   coach, abertura artificial ("você já parou pra pensar"), abuso de
   dois-pontos e paragrafação picotada. Texto reprovado não passa.
 
-### Modo perfil pessoal (`examples/mel.kofmd`) — quatro horários, assistido
+### Modo perfil pessoal (`examples/mel.kofmd`) — dois horários, só atualização de repositórios
 O mesmo motor editorial serve o **perfil pessoal**, sem duplicar pipeline. O
 que muda é o KofMD: ele declara identidade, voz, temas, **opiniões
 registradas**, **fatos conhecidos**, **princípios de engenharia**,
@@ -89,11 +89,14 @@ registradas**, **fatos conhecidos**, **princípios de engenharia**,
   fonte demonstra*; opinião pode ser desenvolvida mas **nunca** distorcida nem
   afirmada com mais certeza do que o material sustenta; princípio orienta o
   argumento, não é manifesto pra repetir.
-- **Quatro horários como categorias flexíveis**: seções `# category <nome>`
-  com `clock` (06:00/12:00/15:00/18:00), `label` e `angle`. O `clock` é a
-  chave que liga o horário da agenda à categoria. As categorias são
-  *orientação* (angulam o texto), **não** quatro obrigações de postar: se não
-  houver material, o horário fica sem post.
+- **Dois horários, função única `projetos`**: seções `# category <nome>` com
+  `clock` (06:00 e 17:00), `label`, `angle` e **`function: projetos`**. O
+  `clock` é a chave que liga o horário da agenda à categoria. Com **todas** as
+  categorias em `projetos`, o `plan` **dispensa a pesquisa de notícias**
+  (imprime o motivo) e o pool de pautas vira apenas o estado dos repositórios
+  das orgs declaradas em `# github` (`orgs: KofLang, Rede-ENois`) — o repo com
+  `pushed_at` mais recente vira o post das 06:00, e o segundo org distinto o
+  das 17:00. Repos pessoais não entram; cada slot tira um projeto diferente.
 - **Autenticidade por construção**: o prompt separa explicitamente
   **FATOS CONHECIDOS** (afirmáveis dentro do que a fonte demonstra),
   **OPINIÕES REGISTRADAS** (desenvolvíveis, nunca distorcidas) e **IDEIAS
@@ -111,7 +114,7 @@ registradas**, **fatos conhecidos**, **princípios de engenharia**,
   a decisão de publicar fica com a autora (assisted).
 
 ```bash
-# os quatro textos do dia, para revisão (não publica):
+# os dois textos do dia, para revisão (não publica):
 java -cp build/classes:$JARS Default.Main plan --company examples/mel.kofmd --store mel.db
 # revisar / aprovar / publicar um deles quando quiser:
 java -cp build/classes:$JARS Default.Main review  <id> --company examples/mel.kofmd --store mel.db
@@ -122,6 +125,49 @@ java -cp build/classes:$JARS Default.Main publish <id> --target dryrun --company
 O agendamento reusa o mesmo scheduler (`# schedule <nome>` com `every: 1` e
 `at: HH:MM`); no modo `assisted` o daemon gera e deixa em `review` sem
 publicar. Ligar publicação automática é uma decisão posterior, não o default.
+
+#### Personalidade: a autora escreve, não um "agente editorial"
+
+O perfil pessoal declara **quem escreve** em seções próprias (`# background`,
+`# values`, `# personality`, `# emotional_profile`, `# language`,
+`# strong_language`, `# technical_domains`, `# editorial_engine`, `# review`,
+`# restrictions`). O código não aplica isso como filtro no fim: a identidade é
+o **system prompt**, e a emoção de cada post é **derivada do perfil** antes de
+gerar, sem chamada de IA.
+
+- **Escala 0-5** (`emotional_profile.levels`): cada nível tem nome e direção.
+  O nível de um post vem do domínio do assunto, dos gatilhos declarados em
+  `emotional_profile.states` e do piso da função do horário. Linguagem forte
+  só é liberada a partir de `strong_language.levels`.
+- **Diretiva visível**: `plan` e `samples` imprimem
+  `DIRETIVA: dominio=… base=… emocao=… nivel=… formato=… funcao=…` e, na linha
+  seguinte, `DIRETIVA> angulo proprio: …`, para você conferir *por que* o texto
+  saiu irritado, curioso ou neutro e por onde a voz dela entra.
+- **Um pouco dela em todo post** (`# signature motifs`): ângulos que ela traz a
+  qualquer assunto, escolhidos um por post (inclusive em nível 0) e usados como
+  critério, não como frase de efeito. Ausência gera aviso de "post genérico".
+- **Motivo de existir**: as `editorial_engine.questions` vão no prompt; se a
+  pauta não responde às duas primeiras, o modelo responde `SKIP:` e nada é
+  gravado. Pauta vazia ou só de conectivos também é recusada.
+- **Revisão que não amacia**: a reescrita é instruída a corrigir só o que a
+  validação apontou, mantendo voz, intensidade e ponto de vista.
+- **Anti-clichê**: estruturas declaradas em `language.cliche_structures`
+  (ex.: "não é sobre X, é sobre Y") reprovam o texto; muletas de influenciador
+  ("recentemente", "tenho pensado", "fiquei pensando") geram aviso e viram
+  problema se já apareceram no histórico.
+
+```bash
+# 25 cenários de personalidade, N amostras cada, SEM gravar e SEM publicar:
+java -cp build/classes:$JARS Default.Main samples \
+  --scenarios examples/amostras.kofmd --runs 2 \
+  --company examples/mel.kofmd --store mel.db
+```
+
+`samples` roda os **dois** gates do pipeline real (validação mecânica e
+barreira de fidelidade factual) e imprime diretiva, veredito e texto de cada
+amostra. As decisões de projeto estão em
+[`docs/personalidade.md`](docs/personalidade.md); amostras reais antes/depois
+em [`docs/amostras/`](docs/amostras/).
 
 ### Pesquisa online, seleção de pauta e memória editorial
 

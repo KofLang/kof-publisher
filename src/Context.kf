@@ -94,7 +94,99 @@ record Company(
     // argue different things and still be the same subject, which is exactly
     // what the thesis comparison cannot see. Declared in the profile so the
     // author owns the taxonomy instead of the code guessing it.
-    List<String> subjects)
+    List<String> subjects,
+    // ---- PERSONALITY (see docs/personalidade.md) ----
+    // The author's own identity, psychology, emotional profile and editorial
+    // engine, all parsed from the SAME KofMD the rest of the profile comes
+    // from. Grouped into a record instead of another twenty flat fields: the
+    // `Company` record is already long and these travel together. Appended
+    // LAST so the positional constructor call keeps its arguments in place.
+    Profile profile)
+
+// One emotional state the author's writing can carry, and what in a subject
+// raises it:
+//   # emotional_profile
+//   states:
+//     - entusiasmo: 2, solucao elegante, maquina antiga que volta a funcionar
+//
+// `level` is the base intensity (0..5) when the state fires; `triggers` are the
+// words that make it fire on a given subject. Both come from the profile — the
+// code never guesses an emotion.
+record EmotionState(String name, Int level, List<String> triggers)
+
+// A technical domain and the author's own angle on it:
+//   - compiladores: 2, o que a escolha de design custa em quem mantem
+// `level` is the domain's own baseline intensity: an unfamiliar subject gets
+// 0, a familiar domain gets this.
+record Domain(String name, Int level, String angle)
+
+// One row of the emotion ladder (`emotional_profile.levels`, level 0..5).
+record ToneLevel(Int level, String name, String direction)
+
+// The personality block: identity, psychology, emotion, voice and the
+// editorial engine, all read from the author's KofMD. Every field has a
+// declared fallback to the pre-personality layout (see `resolveSection`), so a
+// profile written before 2026-11 keeps working — but `profile.origin` records
+// WHICH of the two each section was read from, and `publisher check` prints it.
+record Profile(
+    Bool authored,
+    List<String> background,
+    List<String> values,
+    List<String> personality,
+    String profilePath,
+    String voiceLanguage,
+    String voiceTone,
+    String domainDescription,
+    List<ToneLevel> toneLevels,
+    List<EmotionState> states,
+    List<String> emotionRules,
+    List<Domain> domains,
+    List<String> industryPositions,
+    List<String> teachingPositions,
+    List<String> projects,
+    List<String> engineQuestions,
+    List<String> engineAvoidForms,
+    List<String> formats,
+    List<String> memoryAspects,
+    List<String> signaturePhrases,
+    List<String> expressionBanks,
+    List<String> rhythmRules,
+    List<String> clicheStructures,
+    List<String> notLike,
+    List<String> strongLanguageRules,
+    Int strongLevels,
+    List<String> reviewChecks,
+    List<String> reviewNeutralizeForbidden,
+    List<String> restrictions,
+    // The author's recurring MOTIFS: the angle she brings to any subject, the
+    // criterion she judges by, the thing she always notices. One of these
+    // enters EVERY post, including a level-0 one, so the text is recognisably
+    // hers even when the subject raises no emotion. They are stances, never
+    // episodes: "eu olho o custo de manutencao antes da novidade", not "eu
+    // passei a semana fazendo X".
+    List<String> signatureMotifs,
+    String platformLinkedin,
+    String platformEnois,
+    String platformOther,
+    // section name -> "profile" (declared in the KofMD) or "fallback:<where>".
+    // Printed by `publisher check`; a silent default is what this prevents.
+    List<String> origin)
+
+// The emotion+domain picture of one subject, computed WITHOUT a model call
+// (Editorial.editorialDirective). Printed in the log and in `plan` so the
+// author can see WHY a post was written at that intensity.
+record EditorialFrame(
+    String domain,
+    Int baseLevel,
+    String emotion,
+    Int level,
+    String format,
+    String opinion,
+    String relation,
+    Bool neutral,
+    // The author's signature motif for THIS post: chosen from
+    // `# signature motifs`, it enters every post including a level-0 one.
+    String motif)
 
 // Explicit GitHub source config (# github section). The account is NEVER
 // guessed: it must be declared, because the org name is not the author's
@@ -457,6 +549,320 @@ GithubConfig githubConfigOf(List<Section> secs) {
     return GithubConfig(account, orgs, include, enabled, sectionList(secs, "github", "own_forks"))
 }
 
+// ---- PERSONALITY parsing ----
+//
+// Every helper below returns BOTH what it read and where it read it from, so
+// `publisher check` can print "esta secao veio do perfil" instead of letting a
+// fallback hide a typo. Fallbacks are the PRE-PERSONALITY layout of the same
+// file — an old profile keeps producing the same behaviour, and a new one adds
+// to it.
+
+Bool sectionDeclared(List<Section> secs, String name) {
+    for (var s in secs) {
+        if (s.name() == name) {
+            return true
+        }
+    }
+    return false
+}
+
+// First non-empty list: the new section when declared, else the fallback.
+// `originOut` stays empty — the caller records the decision.
+List<String> listOr(List<Section> secs, String section, String key, List<Section> fallbackSecs, String fallbackSection, String fallbackKey) {
+    var v = sectionList(secs, section, key)
+    if (v.size() > 0) {
+        return v
+    }
+    if (fallbackSection == "") {
+        return v
+    }
+    return sectionList(fallbackSecs, fallbackSection, fallbackKey)
+}
+
+Int intOrZero(String raw) {
+    if (raw != "" && strings.isNumeric(raw)) {
+        return toIntStr(raw)
+    }
+    return 0
+}
+
+// "entusiasmo: 2, solucao elegante, maquina antiga" -> EmotionState.
+// The level is REQUIRED: an entry whose level is not 0..5 is a configuration
+// error, not something to skip silently.
+EmotionState parseState(String raw, String where) {
+    var colon = raw.indexOf(":")
+    if (colon <= 0) {
+        throw "personalidade: " + where + ": estado '" + raw + "' sem nivel (formato 'nome: nivel, gatilho, gatilho')"
+    }
+    var name = raw.substring(0, colon).trim()
+    var rest = raw.substring(colon + 1, raw.length)
+    var parts = rest.split(",")
+    var first = parts[0].trim()
+    if (!strings.isNumeric(first)) {
+        throw "personalidade: " + where + ": estado '" + name + "' com nivel invalido '" + first + "' (use 0 a 5)"
+    }
+    var level = toIntStr(first)
+    if (level < 0 || level > 5) {
+        throw "personalidade: " + where + ": estado '" + name + "' com nivel " + level + " fora da escala 0-5"
+    }
+    var triggers = listOf<String>()
+    var i = 1
+    while (i < parts.length) {
+        var t = parts[i].trim()
+        if (t != "") {
+            triggers.add(t)
+        }
+        i = i + 1
+    }
+    return EmotionState(name, level, triggers)
+}
+
+// "compiladores: 2, angulo proprio" -> Domain.
+Domain parseDomain(String raw, String where) {
+    var colon = raw.indexOf(":")
+    if (colon <= 0) {
+        throw "personalidade: " + where + ": dominio '" + raw + "' sem nivel (formato 'nome: nivel, angulo')"
+    }
+    var name = raw.substring(0, colon).trim()
+    var rest = raw.substring(colon + 1, raw.length)
+    var parts = rest.split(",")
+    var first = parts[0].trim()
+    if (!strings.isNumeric(first)) {
+        throw "personalidade: " + where + ": dominio '" + name + "' com nivel invalido '" + first + "'"
+    }
+    var level = toIntStr(first)
+    if (level < 0 || level > 5) {
+        throw "personalidade: " + where + ": dominio '" + name + "' com nivel " + level + " fora da escala 0-5"
+    }
+    var angle = ""
+    var i = 1
+    while (i < parts.length) {
+        if (angle != "") {
+            angle = angle + ","
+        }
+        angle = angle + parts[i]
+        i = i + 1
+    }
+    return Domain(name, level, angle.trim())
+}
+
+// "0 neutro: texto tecnico..." -> ToneLevel. A ladder without level `n` for
+// every n in 0..5 is a configuration error: the generator cannot pick an
+// intensity the profile never defined.
+ToneLevel parseToneLevel(String raw, String where) {
+    var colon = raw.indexOf(":")
+    if (colon <= 0) {
+        throw "personalidade: " + where + ": nivel '" + raw + "' sem direcao (formato '0 neutro: o que muda no texto')"
+    }
+    var head = raw.substring(0, colon).trim()
+    var sp = head.indexOf(" ")
+    var num = head
+    var nm = ""
+    if (sp > 0) {
+        num = head.substring(0, sp).trim()
+        nm = head.substring(sp + 1, head.length).trim()
+    }
+    if (!strings.isNumeric(num)) {
+        throw "personalidade: " + where + ": nivel '" + head + "' nao comeca com um numero 0-5"
+    }
+    var level = toIntStr(num)
+    if (level < 0 || level > 5) {
+        throw "personalidade: " + where + ": nivel " + level + " fora da escala 0-5"
+    }
+    return ToneLevel(level, nm, raw.substring(colon + 1, raw.length).trim())
+}
+
+String toneDirectionOf(List<ToneLevel> levels, Int n) {
+    for (var l in levels) {
+        if (l.level() == n) {
+            return l.direction()
+        }
+    }
+    return ""
+}
+
+String toneNameOf(List<ToneLevel> levels, Int n) {
+    for (var l in levels) {
+        if (l.level() == n) {
+            return l.name()
+        }
+    }
+    return ""
+}
+
+// Split "dominio: ..." out of the domain list is NOT done here: the domain
+// level is part of each item, so the item is parsed as a whole.
+List<Domain> parseDomains(List<String> raw, String where) {
+    var out = listOf<Domain>()
+    for (var r in raw) {
+        out.add(parseDomain(r, where))
+    }
+    return out
+}
+
+List<EmotionState> parseStates(List<String> raw, String where) {
+    var out = listOf<EmotionState>()
+    for (var r in raw) {
+        out.add(parseState(r, where))
+    }
+    return out
+}
+
+// Build the personality block. `authored` = the profile declares
+// `# personality`: that is the switch that turns the requirements on. A profile
+// without it is the pre-2026-11 layout and gets the documented fallbacks,
+// recorded in `origin`, never a silent empty value.
+Profile loadProfile(List<Section> secs, String path) {
+    var authored = sectionDeclared(secs, "personality")
+    var origin = listOf<String>()
+    var background = sectionList(secs, "background", "background")
+    var values = sectionList(secs, "values", "values")
+    var personality = sectionList(secs, "personality", "personality")
+
+    var lang = "voice"
+    var voiceLanguage = sectionField(secs, lang, "language")
+    var voiceTone = sectionField(secs, lang, "tone")
+
+    var levels = listOf<ToneLevel>()
+    var states = listOf<EmotionState>()
+    var emotionRules = sectionList(secs, "emotional-profile", "rules")
+    var domains = parseDomains(sectionList(secs, "technical-domains", "technical_domains"), "technical-domains")
+    var strong = sectionList(secs, "strong-language", "strong_language")
+    var strongLevels = 4
+    var rawLvl = sectionField(secs, "strong-language", "levels")
+    if (rawLvl != "") {
+        if (!strings.isNumeric(rawLvl)) {
+            throw "personalidade: strong_language.levels deve ser um inteiro (recebido '" + rawLvl + "')"
+        }
+        strongLevels = toIntStr(rawLvl)
+        if (strongLevels < 0 || strongLevels > 5) {
+            throw "personalidade: strong_language.levels fora da escala 0-5: " + strongLevels
+        }
+    }
+    if (authored) {
+        var rawLevels = sectionList(secs, "emotional-profile", "levels")
+        if (rawLevels.size() == 0) {
+            throw "personalidade: # personality declarada, mas emotional_profile.levels esta vazio — defina os seis niveis (0-5)"
+        }
+        for (var r in rawLevels) {
+            levels.add(parseToneLevel(r, "emotional_profile.levels"))
+        }
+        var i = 0
+        while (i <= 5) {
+            var hit = false
+            for (var l in levels) {
+                if (l.level() == i) {
+                    hit = true
+                }
+            }
+            if (!hit) {
+                throw "personalidade: emotional_profile.levels sem o nivel " + i + " (a escala precisa dos seis, 0 a 5)"
+            }
+            i = i + 1
+        }
+        states = parseStates(sectionList(secs, "emotional-profile", "states"), "emotional_profile.states")
+        if (states.size() == 0) {
+            throw "personalidade: # personality declarada, mas emotional_profile.states esta vazio"
+        }
+        if (domains.size() == 0) {
+            throw "personalidade: # personality declarada, mas technical_domains esta vazio"
+        }
+        if (sectionList(secs, "editorial-engine", "questions").size() == 0) {
+            throw "personalidade: # personality declarada, mas editorial_engine.questions esta vazio"
+        }
+        if (sectionList(secs, "diversity", "formats").size() == 0) {
+            throw "personalidade: # personality declarada, mas diversity.formats esta vazio"
+        }
+        if (sectionList(secs, "review", "checks").size() == 0) {
+            throw "personalidade: # personality declarada, mas review.checks esta vazio"
+        }
+        if (rawLvl == "") {
+            throw "personalidade: # personality declarada, mas strong_language.levels esta ausente"
+        }
+    }
+
+    // Formats fall back to the same list the profile always declared under
+    // `# editorial` before formats existed: the old "category" labels were the
+    // only format signal. Recorded in origin.
+    var formats = sectionList(secs, "diversity", "formats")
+    if (formats.size() > 0) {
+        origin.add("diversity.formats=profile")
+    } else {
+        origin.add("diversity.formats=fallback:sem formato declarado (post fica sem marcador e a validacao usa apresentacao natural)")
+    }
+    var emotionOrigin = "profile"
+    if (levels.size() == 0 || states.size() == 0) {
+        emotionOrigin = "fallback:sem # personality (intensidade derivada do dominio e da funcao do horario)"
+    }
+    origin.add("emotional_profile=" + emotionOrigin)
+    origin.add("technical_domains=" + sectionOrigin(secs, "technical-domains", "technical_domains"))
+
+    var memory = listOr(secs, "memory", "memory", secs, "editorial", "diversity")
+    var checks = sectionList(secs, "review", "checks")
+    if (checks.size() == 0) {
+        origin.add("review.checks=fallback:checks fixos do codigo (autenticidade, profundidade, linguagem, diversidade, honestidade)")
+    } else {
+        origin.add("review.checks=profile")
+    }
+    var restrictions = sectionList(secs, "restrictions", "restrictions")
+    if (sectionList(secs, "factuality", "authenticity").size() > 0) {
+        origin.add("factuality.authenticity=profile")
+    } else if (sectionList(secs, "editorial", "authenticity").size() > 0) {
+        origin.add("factuality.authenticity=fallback:editorial.authenticity")
+    } else {
+        origin.add("factuality.authenticity=fallback:regras fixas do codigo")
+    }
+    origin.add("background=" + sectionOrigin(secs, "background", "background"))
+    origin.add("values=" + sectionOrigin(secs, "values", "values"))
+    origin.add("personality=" + sectionOrigin(secs, "personality", "personality"))
+    origin.add("memory=" + firstNonEmpty(sectionOrigin(secs, "memory", "memory"), "ausente"))
+    origin.add("signature.motifs=" + sectionOrigin(secs, "signature", "motifs"))
+    origin.add("platforms=" + sectionOrigin(secs, "platforms", "linkedin"))
+
+    return Profile(
+        authored,
+        background,
+        values,
+        personality,
+        path,
+        voiceLanguage,
+        voiceTone,
+        sectionField(secs, "technical-domains", "description"),
+        levels,
+        states,
+        emotionRules,
+        domains,
+        sectionList(secs, "industry-positions", "industry_positions"),
+        sectionList(secs, "teaching-positions", "teaching_positions"),
+        sectionList(secs, "projects", "projects"),
+        sectionList(secs, "editorial-engine", "questions"),
+        sectionList(secs, "editorial-engine", "avoid_forms"),
+        formats,
+        memory,
+        sectionList(secs, "memory", "signature_phrases"),
+        sectionList(secs, "language", "expressions"),
+        sectionList(secs, "language", "rhythm"),
+        sectionList(secs, "language", "cliche_structures"),
+        sectionList(secs, "language", "not_like"),
+        strong,
+        strongLevels,
+        checks,
+        sectionList(secs, "review", "neutralize_forbidden"),
+        restrictions,
+        sectionList(secs, "signature", "motifs"),
+        sectionField(secs, "platforms", "linkedin"),
+        sectionField(secs, "platforms", "enois"),
+        sectionField(secs, "platforms", "outras"),
+        origin)
+}
+
+String sectionOrigin(List<Section> secs, String name, String key) {
+    if (sectionDeclared(secs, name)) {
+        return "profile"
+    }
+    return "ausente"
+}
+
 // Parse a company .md (KofMD) file into the editorial model. Honest String
 // errors on anything structural — no silent defaults for identity fields.
 Company loadCompany(String path) {
@@ -566,7 +972,8 @@ Company loadCompany(String path) {
         globalList(secs, "rejects"),
         globalList(secs, "evidence"),
         sectionList(secs, "editorial", "research_feeds"),
-        sectionList(secs, "editorial", "subjects"))
+        sectionList(secs, "editorial", "subjects"),
+        loadProfile(secs, path))
 }
 
 KofmdSchema? findSchema(List<KofmdSchema> schemas, String name) {

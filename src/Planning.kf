@@ -231,6 +231,19 @@ Bool validPlanFunction(String f) {
     return false
 }
 
+// Does the profile schedule any slot that consumes external research? With the
+// two repository-update slots of 2026-11-13, no: the projects pool is repo-only,
+// so a research pass would spend network time and source queries producing
+// material nothing reads. The daemon and `plan` ask this before fetching.
+Bool planNeedsResearch(Company company) {
+    for (var cat in company.categories()) {
+        if (cat.function() == "noticias") {
+            return true
+        }
+    }
+    return false
+}
+
 // Clock default, used when a profile does not declare `function:`. Matches the
 // mapping the profile documents: manha projetos, meio-dia noticias, tarde
 // contraponto, noite observacao.
@@ -895,18 +908,14 @@ PlanSet buildPlan(Company company, Store store, ResearchRun research, Int repoMa
         var job = cat.function()
         var pool = listOf<PlanCandidate>()
         if (job == "projetos") {
+            // REPOSITORY UPDATES ONLY (author's instruction, 2026-11-13): the
+            // projects slot draws exclusively from analysed repository state.
+            // Research items are NOT admitted here even when they mention Kof
+            // — a news story is not a repository update, and "apenas posts de
+            // atualizacao dos repositorios" is a scope decision, not a
+            // preference. With no recent repo activity the slot is honestly
+            // empty (see the quality floor below), never filled with news.
             pool = repoScored
-            // Kof is the author's own language and her main project, so a Kof
-            // item from the research pass is material for the "trabalho real"
-            // slot too — not only for the news slot. Only Kof items are added:
-            // the projects slot must stay about HER work, and a general story
-            // belongs at noon. `usedKeys` still stops the same item from being
-            // taken by both slots in one run.
-            for (var kc in newsScored) {
-                if (mentionsKof(kc.theme() + " " + kc.argument())) {
-                    pool.add(kc)
-                }
-            }
         } else {
             if (job == "noticias") {
                 pool = newsScored

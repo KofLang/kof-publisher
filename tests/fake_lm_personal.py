@@ -397,6 +397,24 @@ SAME_THESIS_B = (
 # H: the SAME SUBJECT with a DIFFERENT, justified conclusion. The semantic gate
 # must NOT collapse these into "the same thesis" — the spec explicitly allows a
 # return to a subject when the conclusion differs.
+# Two lexically DIFFERENT "trabalho" drafts, one per org, so the repo-only
+# profile (two projects slots in one run) passes the anti-repetition gate.
+# Both stay within the projects function's evidence rules: nothing verified,
+# nothing guaranteed, no first-person episode.
+TRABALHO_ENOIS_TEXT = (
+    "A mudanca que chegou ao enois-backend nesta semana foi no contrato entre "
+    "os modulos de entrada e de persistencia, e o efeito pratico e que uma "
+    "classe de erro deixa de ter espaco pra aparecer. E o tipo de ajuste que "
+    "ninguem celebra no release notes mas que sustenta o resto do projeto. "
+    "#backend #opensource"
+)
+TRABALHO_KOF_TEXT = (
+    "No kof4j o trabalho recente segue concentrado em manter o compilador "
+    "honesto com a JVM, e o que os ultimos commits mostram e esse cuidado com "
+    "o contrato entre a linguagem e o runtime. Projeto pequeno, mas cada "
+    "decisao ali aparece depois em tudo que roda por cima. #java #compiladores"
+)
+
 SAME_SUBJECT_OTHER_ANGLE = (
     "Microsservicos resolvem um problema real quando o gargalo e organizacional, "
     "como autonomia de times e ciclos de deploy independentes, e nesse caso a "
@@ -469,7 +487,94 @@ NEWS_VARY_B = (
 )
 
 
+# --- persona mode -----------------------------------------------------------
+# Reads the DIRETIVA EDITORIAL block the pipeline now builds and answers IN
+# THAT LEVEL, so a test can prove the personality reaches the model instead of
+# only reaching the config. The texts are deliberately different per level: a
+# fixture that answered the same thing at level 0 and level 4 would make the
+# whole intensity scale untestable.
+PERSONA_BY_LEVEL = {
+    0: (
+        "O ajuste no parser de copybook troca a leitura posicional por um "
+        "mapeamento declarado, o que reduz o acoplamento entre o layout do "
+        "arquivo e o codigo que o consome. A mudanca e pequena e o efeito e "
+        "local, sem alterar o contrato exposto para quem chama o modulo."
+    ),
+    1: (
+        "Achei interessante o ajuste no parser de copybook, porque trocar "
+        "leitura posicional por mapeamento declarado resolve um problema que "
+        "eu vejo repetir em projeto legado, que e o codigo saber demais sobre "
+        "o formato do arquivo. Nao e a mudanca mais glamourosa, mas e a que "
+        "para de gerar bug quando o layout muda."
+    ),
+    2: (
+        "Cara, esse ajuste no parser de copybook me deixou contente de um "
+        "jeito bem especifico, porque mapeamento declarado no lugar de leitura "
+        "posicional e o tipo de simplificacao que parece pequena e muda o dia "
+        "de quem mantem o negocio. Eu gosto disso, de codigo que para de "
+        "saber demais sobre o formato do arquivo e passa a dizer o que espera."
+    ),
+    3: (
+        "Eu defendo esse ajuste no parser de copybook com conviccao, porque "
+        "leitura posicional em codigo de negocio e uma divida que cobra juros "
+        "todo mes, e mapeamento declarado nao e elegante por estetica, e "
+        "porque ele deixa o contrato visivel para quem chega depois. Quem ja "
+        "manteve parser de arquivo legado sabe o custo de descobrir o layout "
+        "lendo offset."
+    ),
+    4: (
+        "Me irrita profundamente que ainda em 2026 a gente trate leitura "
+        "posicional de arquivo como solucao aceitavel, e esse ajuste no parser "
+        "de copybook e a prova de que dava para fazer diferente desde sempre. "
+        "Mapeamento declarado nao e luxo, e o minimo, e quem defende offset "
+        "magico nunca foi acordado as tres da manha por causa dele."
+    ),
+    5: (
+        "Nao tenho paciencia nenhuma para leitura posicional em codigo de "
+        "negocio, e esse ajuste no parser de copybook so confirma o que eu "
+        "penso ha anos, que offset magico e uma bomba com prazo e quem escreve "
+        "isso sabe. Mapeamento declarado deveria ser o padrao desde o primeiro "
+        "dia, e o fato de precisar de um fix para chegar la diz muito sobre "
+        "como a gente trata manutencao."
+    ),
+}
+
+
+def persona_reply(prompt: str) -> str:
+    m = re.search(r"intensidade: (\d)", prompt)
+    level = int(m.group(1)) if m else 0
+    if level not in PERSONA_BY_LEVEL:
+        level = 0
+    text = PERSONA_BY_LEVEL[level]
+    f = re.search(r"formato desta vez: (.*)", prompt)
+    if f:
+        text = text + "\n\n[formato: " + f.group(1).strip() + "]"
+    return text
+
+
+# Positive controls for the new voice gates: each carries exactly ONE thing the
+# profile forbids, in an otherwise valid text.
+CLICHE_STRUCTURE_TEXT = (
+    "A discussao sobre convencao de nomeacao sempre termina no mesmo lugar, e "
+    "nao e sobre nomes, e sobre quem entende o codigo seis meses depois sem "
+    "perguntar nada pra ninguem. Renomear sozinho nao resolve, o que resolve e "
+    "deixar a intencao visivel na estrutura."
+)
+
+INFLUENCER_MUG_TEXT = (
+    "Recentemente comecei a olhar parser de arquivo com outros olhos e o que "
+    "mudou foi menos o codigo e mais o criterio de leitura. Trocar offset "
+    "magico por tabela declarada economiza a hora de quem chega depois."
+)
+
+
 def pick_reply(prompt: str, mode: str) -> str:
+    if mode == "cliche":
+        return CLICHE_STRUCTURE_TEXT
+    if mode == "influencer":
+        return INFLUENCER_MUG_TEXT
+    if mode == "persona":
+        return persona_reply(prompt)
     if mode == "forbidden":
         return FORBIDDEN_TEXT
     if mode == "repeat":
@@ -556,6 +661,17 @@ def pick_reply(prompt: str, mode: str) -> str:
             return text
     for key, text in BY_FUNCTION.items():
         if key in label:
+            # A repo-only profile plans TWO projects slots in one run; the same
+            # text for both would trip the anti-repetition gate before anything
+            # else is measured, so the draft varies by which repo the pauta is
+            # about (the repo slug appears in the prompt's evidence block).
+            if key == "trabalho":
+                m = re.search(r"TEMA DESTA PUBLICACAO: atualizacao no projeto (\S+)", prompt)
+                theme = m.group(1).lower() if m else ""
+                if "enois" in theme:
+                    return TRABALHO_ENOIS_TEXT
+                if "kof4j" in theme:
+                    return TRABALHO_KOF_TEXT
             return text
     return REPEAT_TEXT
 

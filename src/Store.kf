@@ -231,6 +231,20 @@ record PruneReport(
     Long bytesBefore,
     Long bytesAfter)
 
+// True when `a` is strictly older than `b` for a newest-first ordering.
+// GitHub's pushed_at is ISO-8601 UTC ("2026-11-12T18:19:35Z"), so a plain
+// lexicographic compare is a chronological compare. An empty/unknown stamp is
+// treated as OLDER than any known one: "unknown" must never read as "fresh".
+Bool repoPushedBefore(String a, String b) {
+    if (a == "") {
+        return false
+    }
+    if (b == "") {
+        return true
+    }
+    return a.compareTo(b) < 0
+}
+
 class Store {
     String conn
     String dbPath
@@ -482,6 +496,23 @@ class Store {
         return n
     }
 
+    // Did this schedule already POST on that day? A slot that published must
+    // never be retried: the retry exists to save a slot that produced nothing,
+    // and running it after a successful post publishes a SECOND text for the
+    // same hour. Measured on 2026-11-07: the 06:00 slot published at 05:53,
+    // the retry was scheduled for 05:56, and because that instant was still in
+    // the future the retry generated a fresh draft and posted it too — two
+    // posts for one slot, both on LinkedIn.
+    Bool publishedForDay(String scheduleName, String dayPrefix) {
+        var prefix = scheduleName + "@" + dayPrefix
+        for (var o in orm.all<Occurrence>(conn)) {
+            if (o.id().startsWith(prefix) && o.result() == "success" && o.stage() == "publication") {
+                return true
+            }
+        }
+        return false
+    }
+
     // ---- repo knowledge (GitHub source, incremental) ----
 
     Int saveRepoState(RepoState r) {
@@ -497,8 +528,26 @@ class Store {
         return v as RepoState
     }
 
+    // Newest activity FIRST. `orm.all` has no ORDER BY and returns insertion
+    // order, which is arbitrary with respect to what recently changed: the
+    // digest is capped (`githubDigest(..., 4)`) and the projects pool is read
+    // top-down, so without this the most recently pushed repos of KofLang and
+    // Rede-ENois could be the ones hidden by the cap. Insertion sort, small
+    // list, no sort primitive in this runtime (same idiom as Thesis.kf).
     allRepoStates(): List<RepoState> {
-        return orm.all<RepoState>(conn)
+        var rows = orm.all<RepoState>(conn)
+        var i = 1
+        while (i < rows.size()) {
+            var cur = rows.get(i)
+            var j = i - 1
+            while (j >= 0 && repoPushedBefore(rows.get(j).pushed_at(), cur.pushed_at())) {
+                rows.set(j + 1, rows.get(j))
+                j = j - 1
+            }
+            rows.set(j + 1, cur)
+            i = i + 1
+        }
+        return rows
     }
 
     // ---- editorial memory: pautas ----

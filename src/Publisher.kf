@@ -25,6 +25,7 @@ String publisherUsage() {
     u = u + "  sync                       load the # schedule blocks of company.kofmd\n"
     u = u + "  github [--limit N] [--repo owner/name] [--force] [--show]  analisa projetos publicos (so leitura) e alimenta o material\n"
     u = u + "  research [--sources a,b] [--rss url] [--query q]  consulta as fontes atuais e lista candidatos com url/data\n"
+    u = u + "  samples --scenarios f [--runs N] [--scenario nome]  amostras de personalidade para inspecao (nao grava, nao publica)\n"
     u = u + "  db-stats                   diagnostico do banco: registros por estado, pautas, fontes, tamanho, limite, integridade\n"
     u = u + "  db-prune [--vacuum]        aplica a retencao (so remove registros terminais, mais antigos primeiro)\n"
     u = u + "  daemon                     run the recurring agenda (STOP file / Ctrl-C)\n"
@@ -151,6 +152,19 @@ Int cmdCheck(Store store, Company company) {
     println("timezone     : " + company.timezone())
     println("context      : " + company.digest())
     println("topics       : " + joinList(company.topics()))
+    // Personality: WHICH sections came from the profile and which fell back to
+    // the pre-personality layout. A fallback is legitimate for an old profile,
+    // but it must never be invisible — a typo in a section name would otherwise
+    // silently drop the author's identity.
+    var pr = company.profile()
+    println("personalidade: perfil autoral declarado = " + boolWord(pr.authored()))
+    for (var o in pr.origin()) {
+        println("  " + o)
+    }
+    if (pr.authored()) {
+        println("  niveis de emocao: " + pr.toneLevels().size() + "  estados: " + pr.states().size() + "  dominios: " + pr.domains().size() + "  formatos: " + pr.formats().size())
+        println("  linguagem forte a partir do nivel: " + pr.strongLevels())
+    }
     println("schedules    : " + company.schedules().size())
     var sched = Scheduler(store, company)
     for (var s in company.schedules()) {
@@ -546,7 +560,15 @@ Int cmdPlan(Store store, Company company, List<String> args) {
     }
     var noResearch = hasFlag(args, "--no-research")
     var run = ResearchRun(listOf<ResearchItem>(), listOf<String>(), 0)
-    if (!noResearch) {
+    // A profile whose slots are all "projetos" has no consumer for research
+    // items (the projects pool is repository-only), so the pass is skipped
+    // instead of querying sources nothing will read. Stated in the output so
+    // the absence of "Pesquisando..." is never mistaken for a silent failure.
+    if (!noResearch && !planNeedsResearch(company)) {
+        println("Pesquisa dispensada: nenhum horario consome noticias (todas as categorias sao de atualizacao de repositorio).")
+        println("")
+    }
+    if (!noResearch && planNeedsResearch(company)) {
         println("Pesquisando fontes atuais...")
         run = researchRun(company.timezone(), sources, researchFeedUrls(company), "")
         for (var n in run.notes()) {
@@ -655,7 +677,7 @@ Int cmdPlan(Store store, Company company, List<String> args) {
             }
             println("evidencia: " + c.evidence())
 
-            var ed = Editorial(company)
+            var ed = Editorial(company).withFunction(ch.function())
             var block = planEvidenceBlockFor(store, c, run)
             if (block != "") {
                 ed = ed.withExtra(block)
@@ -687,6 +709,9 @@ Int cmdPlan(Store store, Company company, List<String> args) {
                 }
                 v = v2
                 round = round + 1
+            }
+            if (ed.lastDirective != "") {
+                println(ed.lastDirective)
             }
             if (draft == "") {
                 continue
@@ -1494,6 +1519,141 @@ Int cmdStatus(Store store, Company company) {
 // selection later has to justify itself against. A source that fails is
 // printed as a failure, never as an empty result dressed up as "nothing hot
 // today".
+// ---- `samples` — behavioral inspection, NEVER publishing ----
+//
+// The mission asks for input/output examples of the personality across many
+// scenarios, with several samples each, and explicitly forbids judging a
+// personality on a single response. This command is that surface: it reads a
+// scenario file, generates N drafts per scenario through the SAME pipeline the
+// daemon uses, prints the directive that produced each one and the validation
+// verdict, and writes NOTHING to the store and NOTHING to any target.
+//
+// Scenario file (KofMD, one section per scenario):
+//   # scenario conquista
+//   function: projetos
+//   topic: o kofbank ganhou um fix no parser de copybook
+//   material: <optional extra material, treated as untrusted source data>
+record SampleScenario(String name, String function, String topic, String material, String objective)
+
+List<SampleScenario> loadScenarios(String path) {
+    var raw = File(path).readText()
+    if (raw == null) {
+        throw "cenarios: arquivo ilegivel: " + path
+    }
+    var secs = CompanySections(KofmdTool().parse(raw)).all()
+    var out = listOf<SampleScenario>()
+    for (var s in secs) {
+        if (!s.name().startsWith("scenario")) {
+            continue
+        }
+        var name = s.name()
+        var dash = name.indexOf("-")
+        if (dash >= 0) {
+            name = name.substring(dash + 1, name.length)
+        }
+        var topic = sectionField(secs, s.name(), "topic")
+        if (topic == "") {
+            throw "cenarios: '" + name + "' sem 'topic'"
+        }
+        out.add(SampleScenario(name,
+            sectionField(secs, s.name(), "function"),
+            topic,
+            sectionField(secs, s.name(), "material"),
+            sectionField(secs, s.name(), "objective")))
+    }
+    return out
+}
+
+Int cmdSamples(Store store, Company company, List<String> args) {
+    var path = flagValue(args, "--scenarios", "")
+    if (path == "") {
+        println("publisher: samples exige --scenarios <arquivo>")
+        return 1
+    }
+    var runs = 1
+    var rawRuns = flagValue(args, "--runs", "1")
+    if (strings.isNumeric(rawRuns)) {
+        runs = toIntStr(rawRuns)
+    }
+    var only = flagValue(args, "--scenario", "")
+    var scenarios = loadScenarios(path)
+    if (scenarios.size() == 0) {
+        println("publisher: nenhum cenario em " + path)
+        return 1
+    }
+    // The recent memory is read from the store but never written: samples must
+    // not become "already published" material for the real pipeline.
+    var recent = store.recentEditorialContents(8, "")
+    println("Amostras de personalidade — " + company.name() + "  (" + scenarios.size() + " cenario(s), " + runs + " amostra(s) cada)")
+    println("NADA e gravado e NADA e publicado: este comando so gera e valida.")
+    println("")
+    var total = 0
+    var passed = 0
+    for (var sc in scenarios) {
+        if (only != "" && sc.name() != only) {
+            continue
+        }
+        println("==== cenario: " + sc.name() + "  [funcao " + firstNonEmpty(sc.function(), "(sem funcao)") + "]")
+        println("pauta: " + sc.topic())
+        var r = 0
+        while (r < runs) {
+            var ed = Editorial(company).withFunction(sc.function())
+            if (sc.material() != "") {
+                ed = ed.withExtra(sc.material())
+            }
+            var draft = ""
+            // The sample index is the format seed, so repeated samples step
+            // through the profile's list instead of returning the same one
+            // four times: the point of several samples is to see the range.
+            ed = ed.withSeed("amostra " + (r + 1))
+            try {
+                draft = ed.generateFrame(sc.topic(), recent, sc.objective(), "", "", sc.function())
+            } catch (String e) {
+                println("  amostra " + (r + 1) + ": SKIP — " + e)
+                r = r + 1
+                continue
+            } catch (Throwable e) {
+                println("  amostra " + (r + 1) + ": ERRO — " + e.toString())
+                r = r + 1
+                continue
+            }
+            total = total + 1
+            var v = ed.validate(draft, recent)
+            // The samples must show the SAME two gates the real pipeline has.
+            // Running only the mechanical validator reported "validacao: sim"
+            // for drafts that invented a lived episode ("passei a semana
+            // mexendo no parser..."), because the fidelity barrier is a
+            // separate step. A sample that hides a gate is worse than no
+            // sample: it reads as approval.
+            var fc = ed.validateFactual(draft, listOf<SourceRef>(), "", "", "")
+            if (v.ok() && fc.ok()) {
+                passed = passed + 1
+            }
+            println("  amostra " + (r + 1) + ": " + ed.lastDirective)
+            println("  validacao: " + boolWord(v.ok()) + "  fidelidade: " + boolWord(fc.ok()))
+            for (var p in v.problems()) {
+                println("    problema: " + p)
+            }
+            for (var w in v.warnings()) {
+                println("    aviso: " + w)
+            }
+            for (var p in fc.problems()) {
+                println("    fidelidade: " + p)
+            }
+            for (var w in fc.warnings()) {
+                println("    fidelidade (aviso): " + w)
+            }
+            println("  --- texto ---")
+            println(draft)
+            println("  --- fim ---")
+            println("")
+            r = r + 1
+        }
+    }
+    println("resumo: " + passed + "/" + total + " amostra(s) passaram na validacao deterministica E na barreira de fidelidade")
+    return 0
+}
+
 Int cmdResearch(Store store, Company company, List<String> args) {
     var sources = company.researchSources()
     var raw = flagValue(args, "--sources", "")
@@ -1714,6 +1874,9 @@ Int publisherMain(List<String> args) {
             }
             if (cmd == "research") {
                 return cmdResearch(store, company, rest)
+            }
+            if (cmd == "samples") {
+                return cmdSamples(store, company, rest)
             }
             if (cmd == "db-stats") {
                 return cmdDbStats(store, company)

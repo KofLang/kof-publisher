@@ -638,3 +638,58 @@ test "plan: a concessive clause does not excuse a test guarantee either" {
     stopLm("pl-embora")
     stopResearch("pl-embora")
 }
+
+// The author's requested operating mode (2026-11-13): TWO slots, both
+// repository updates, scoped to KofLang and Rede-ENois, and NOTHING else. This
+// test pins the three properties that make that mode real:
+//   1. both slots draw from repo state only — a current Kof NEWS item is not
+//      admitted to a projects slot (the old behaviour did admit it)
+//   2. the two slots take DIFFERENT repositories (KofLang and Rede-ENois), so
+//      the second post is not the same project as the first
+//   3. the most recently pushed repo is chosen first (the store orders by
+//      pushed_at desc), so activity, not insertion order, decides
+test "plan: two repository-only slots take different orgs, newest activity first" {
+    prepare("pl-repoonly")
+    var c = "# company\nname: Mel Santos\n\n# topics\ntopics:\n  - Java e o ecossistema JVM\n  - projetos open source\n\n# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\ntarget: linkedin\n\n"
+    c = c + "# editorial\nrequire_material: true\nresearch:\n  - hackernews\nresearch_max_age_hours: 168\n\n"
+    c = c + "# github\nenabled: true\norgs:\n  - KofLang\n  - Rede-ENois\n\n"
+    c = c + "# category morning\nclock: 06:00\nlabel: trabalho real e projetos\nfunction: projetos\nangle: o que mudou no projeto\n\n"
+    c = c + "# category evening\nclock: 17:00\nlabel: trabalho real e projetos\nfunction: projetos\nangle: o que mudou no outro projeto\n"
+    File(workDir("pl-repoonly") + "/company.kofmd").writeText(c)
+
+    startGithubFixture("pl-repoonly", "12090", "normal")
+    startResearch("pl-repoonly", "12091", "normal")
+    startLm("pl-repoonly", "12092")
+    var g = runCmd("cd '" + workDir("pl-repoonly") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-repoonly") + "/home' KOF_GITHUB_API=http://127.0.0.1:12090 java -cp '" + classpath() + "' Default.Main github --limit 10 --company company.kofmd --store pub.db")
+    assert(exitOf(g) == 0, g)
+    stopGithubFixture("pl-repoonly")
+
+    var base = "http://127.0.0.1:12091"
+    var cmd = "cd '" + workDir("pl-repoonly") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-repoonly") + "/home'"
+        + " KOF_RESEARCH_HN_API='" + base + "/hn' KOF_RESEARCH_DEVTO_API='" + base + "/devto' KOF_RESEARCH_TIMEOUT=10"
+        + " KOF_LM_URL=http://127.0.0.1:12092 KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25"
+        + " java -cp '" + classpath() + "' Default.Main plan --company company.kofmd --store pub.db 2>&1"
+    var p = runCmd(cmd)
+    assert(exitOf(p) == 0, p)
+    var out = outOf(p)
+
+    // 2 proposals, both reported as repository-origin, from DIFFERENT orgs
+    assert(has(out, "2 proposta(s) em REVIEW"), out)
+    assert(has(out, "origem: repo  Rede-ENois/enois-backend"), out)
+    assert(has(out, "origem: repo  KofLang/kof4j"), out)
+    // 1: a Kof news item from the research fixture exists and must NOT appear
+    //    as a projects candidate ("Kof 0.5.0-beta compila para JVM" is served
+    //    by fake_research and would previously be admitted to the slot)
+    assert(!has(out, "Kof 0.5.0-beta compila para JVM"), out)
+    assert(!has(out, "origem: research"), out)
+    // 3: newest push first — Rede-ENois (6h) is the 06:00 pick, KofLang (411h)
+    //    the 17:00 one, which is exactly what the store ordering guarantees
+    var six = out.indexOf("---- 06:00")
+    var five = out.indexOf("---- 17:00")
+    assert(six >= 0 && five > six, out)
+    var first = out.substring(six, five)
+    assert(has(first, "Rede-ENois/enois-backend"), first)
+    assert(!has(first, "KofLang/kof4j"), first)
+    stopLm("pl-repoonly")
+    stopResearch("pl-repoonly")
+}

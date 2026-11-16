@@ -338,30 +338,37 @@ class Scheduler {
         var catLabel = ""
         var catAngle = ""
         var cat = categoryAt(company.categories(), s.clock())
+        var catFunction = ""
         if (cat != null) {
             var c2 = cat
             catLabel = c2.label()
             catAngle = c2.angle()
+            catFunction = c2.function()
         }
         var topic = ""
         var objective = ""
-        var ed = Editorial(company)
+        var ed = Editorial(company).withFunction(catFunction)
         var isProfileSlot = cat != null
         var chosen = PlanChoice("", "", "", "", "", false, emptyCandidate(), "")
         var run = ResearchRun(listOf<ResearchItem>(), listOf<String>(), 0)
         if (isProfileSlot) {
             // EDITORIAL PROFILE — the SAME pipeline `plan` runs, executed at
             // every clock. Without this the daemon would generate from the
-            // static profile alone: the news slot would never see a current
-            // source, and the pauta behind the draft would never be recorded,
-            // so a later cycle could not tell the topic had already been used.
+            // static profile alone: the pauta behind the draft would never be
+            // recorded, so a later cycle could not tell the topic had already
+            // been used.
             //
             // Research is best-effort and honest: a source that fails is logged
             // and the slot is SKIPPED, never filled with an invented story.
-            var runR = researchRun(company.timezone(), company.researchSources(), researchFeedUrls(company), "")
-            run = runR
-            for (var rn in run.notes()) {
-                log.info("pesquisa " + s.clock() + ": " + rn)
+            // It only runs when a slot actually CONSUMES research (function
+            // "noticias"). A profile with repository-update slots only must not
+            // pay for network queries whose result nothing reads.
+            if (planNeedsResearch(company)) {
+                var runR = researchRun(company.timezone(), company.researchSources(), researchFeedUrls(company), "")
+                run = runR
+                for (var rn in run.notes()) {
+                    log.info("pesquisa " + s.clock() + ": " + rn)
+                }
             }
             // Same history the `plan` command feeds the scorer: the persisted
             // pautas AND the topics of the drafts already written. Using only
@@ -485,6 +492,11 @@ class Scheduler {
             }
             observability.increment("publisher.content.generated", 1)
             observability.increment("publisher.content.validated", 1)
+            // The directive is the answer to "why did this post come out like
+            // this". `plan` and `samples` print it; the daemon published
+            // without ever recording it, so a post that went out at 18:00
+            // could not be explained afterwards. One line, no secrets.
+            log.info("ocorrencia " + key + ": " + ed.lastDirective)
             // The pauta behind the draft is recorded BEFORE the draft itself,
             // exactly as `plan` does: the next cycle then sees the topic as
             // already used, and the draft can point at the sources that
@@ -743,8 +755,26 @@ class Scheduler {
                     // "review" counts as a miss only in autonomous mode (in
                     // assisted mode REVIEW is the intended outcome).
                     var missed = report.result() == "skipped" || report.result() == "failed"
+                    // "already claimed" is a NO-OP, not a miss: the occurrence
+                    // was already handled (by the prep run, by a restart, or by
+                    // a race). Counting it as a miss is what scheduled the
+                    // duplicate retry on 2026-11-07.
+                    if (report.detail() == "already claimed") {
+                        missed = false
+                    }
                     if (!missed && report.result() == "review" && effectiveMode(s2) == "autonomous") {
                         missed = true
+                    }
+                    // A slot that ALREADY POSTED today is never retried. The
+                    // retry exists to save a slot that produced nothing; after a
+                    // successful post it produces a SECOND text for the same
+                    // hour. Measured on 2026-11-07: the 06:00 slot published at
+                    // 05:53, the retry was scheduled for 05:56, and because that
+                    // instant was still ahead the retry generated a fresh draft
+                    // and published it too — two posts for one slot.
+                    if (missed && store.publishedForDay(s2.name(), occIso.substring(0, 10))) {
+                        missed = false
+                        log.info("agenda '" + s2.name() + "': ja publicou hoje — sem retentativa (evita post duplicado)")
                     }
                     if (missed && retryBudgetLeft(s2, occIso)) {
                         var retryAt = retryInstant(s2, occIso)

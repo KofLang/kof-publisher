@@ -1,0 +1,394 @@
+// Behavioral tests for the PERSONALITY layer (docs/personalidade.md).
+//
+// Nothing here publishes, and nothing here judges a personality on ONE
+// response: every generative assertion reads several samples, and the ones that
+// test consistency across samples (format diversity, no repeated opening) need
+// more than one by construction.
+//
+// What is mechanical and what is NOT is stated here because the mission
+// forbids passing a checklist off as a real review:
+//   MECHANICAL (asserted below): the profile loads with provenance; the persona
+//     reaches the system prompt; the directive (domain, emotion, level, format)
+//     is derived FROM the profile and appears in the user prompt; the level
+//     follows the declared scale; a profile without `# personality` keeps the
+//     old behaviour; clichés and influencer crutches are rejected; the revision
+//     pass keeps the directive instead of neutralizing it.
+//   HUMAN (not asserted, only made possible): whether a given post sounds like
+//     Melissa. The `samples` command exists for that — a model cannot grade its
+//     own voice, and a test that claimed to would be the fake review the
+//     mission forbids.
+
+String envOr(String key, String dflt) {
+    var v = config.env(key)
+    if (v != null && v != "") {
+        return v
+    }
+    return dflt
+}
+
+String publisherDir() {
+    return envOr("KOF_PUBLISHER_DIR", "/home/mel/Documentos/kof-publisher")
+}
+
+String classpath() {
+    var home = envOr("HOME", "/home/mel")
+    var drv = envOr("KOF_SQLITE_JAR", home + "/.kof/deps/org/xerial/sqlite-jdbc/3.53.4.0/sqlite-jdbc-3.53.4.0.jar")
+    return envOr("KOF_PUBLISHER_CLASSES", publisherDir() + "/build/classes")
+        + ":" + home + "/.local/share/kof/lib/kof.jar:" + drv
+}
+
+String workDir(String name) {
+    return "/tmp/kof-pub-tests/" + name
+}
+
+void prepare(String name) {
+    var r = process.run("sh", "-c", "rm -rf '" + workDir(name) + "' && mkdir -p '" + workDir(name) + "/home'")
+    assert(r.exitCode == 0, "prepare " + name + ": " + r.stderr)
+}
+
+String runCmd(String cmd) {
+    var r = process.run("sh", "-c", cmd + " 2>&1 </dev/null")
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+Int exitOf(String blob) {
+    var i = blob.indexOf("||EXIT=")
+    if (i < 0) {
+        throw "no exit marker"
+    }
+    return blob.substring(i + 7).toInt()
+}
+
+String outOf(String blob) {
+    var i = blob.indexOf("||EXIT=")
+    return blob.substring(0, i)
+}
+
+Bool has(String hay, String needle) {
+    return hay.indexOf(needle) >= 0
+}
+
+Int countOf(String hay, String needle) {
+    return hay.split(needle).length - 1
+}
+
+String cli(String name, String port, String args) {
+    var cmd = "KOF_PUBLISHER_HOME='" + workDir(name) + "/home' "
+        + "KOF_LM_URL=http://127.0.0.1:" + port + " KOF_LM_STYLE=ollama KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25 "
+        + "java -cp '" + classpath() + "' Default.Main " + args + " 2>&1 </dev/null"
+    var r = process.run("sh", "-c", "cd '" + workDir(name) + "' && " + cmd)
+    return r.stdout + "||EXIT=" + r.exitCode
+}
+
+String startLm(String name, String port, String mode) {
+    runCmd("pkill -f 'fake_lm_persona[l].py " + port + "' || true; true")
+    // The fixture writes prompts.log to its CWD, so it must run INSIDE the
+    // test's workdir — otherwise the prompt evidence lands in the repo root and
+    // the assertions read a file that is not there.
+    //
+    // The port is freed by PID, not by pattern: a fixture left over from an
+    // earlier run keeps the port bound and the new one dies with EADDRINUSE,
+    // which surfaces as a confusing "fixture did not log prompts".
+    runCmd("fuser -k " + port + "/tcp 2>/dev/null || true")
+    // Polled, not "sleep 1 then curl": under the parallel load of a suite the
+    // fixture can take longer than a second to bind, and a single probe would
+    // fail the start rather than wait for it.
+    var up = runCmd("cd '" + workDir(name) + "' && { python3 '" + publisherDir() + "/tests/fake_lm_personal.py' " + port + " " + mode + " > lm.log 2>&1 & echo $! > lm.pid; }; i=0; while [ $i -lt 50 ]; do if curl -s -m 2 http://127.0.0.1:" + port + "/api/tags | grep -q models; then echo ready; exit 0; fi; i=$((i+1)); sleep 0.2; done; echo 'fixture did not come up'; cat lm.log; exit 1")
+    assert(exitOf(up) == 0, up)
+    return outOf(up)
+}
+
+void stopLm(String name) {
+    runCmd("kill $(cat '" + workDir(name) + "/lm.pid') 2>/dev/null || true")
+}
+
+List<String> sectionsIn(String text) {
+    var out = listOf<String>()
+    for (var line in text.split("\n")) {
+        if (line.startsWith("==== cenario: ")) {
+            out.add(line.substring(14, line.length).trim())
+        }
+    }
+    return out
+}
+
+String directiveOf(String text, String scenario) {
+    var lines = text.split("\n")
+    var inScenario = false
+    for (var line in lines) {
+        if (line.startsWith("==== cenario: ")) {
+            inScenario = line.indexOf(scenario) >= 0
+        }
+        if (inScenario && line.indexOf("DIRETIVA: ") >= 0) {
+            return line.substring(line.indexOf("DIRETIVA: "), line.length)
+        }
+    }
+    return ""
+}
+
+// ---- 1. the profile is the single source of truth ----
+
+test "personality: the profile loads with provenance and no silent fallback" {
+    prepare("pers-load")
+    var cp = runCmd("cp '" + publisherDir() + "/examples/mel.kofmd' '" + workDir("pers-load") + "/company.kofmd'")
+    assert(exitOf(cp) == 0, cp)
+    // `check` exits 1 when no LM is reachable, which is not what this test is
+    // about: the profile parsing is asserted from the output.
+    var o = cli("pers-load", "11611", "check --company company.kofmd --store pub.db")
+    var t = outOf(o)
+    assert(has(t, "personalidade: perfil autoral declarado = sim"), t)
+    assert(has(t, "emotional_profile=profile"), t)
+    assert(has(t, "technical_domains=profile"), t)
+    assert(has(t, "diversity.formats=profile"), t)
+    assert(has(t, "review.checks=profile"), t)
+    assert(has(t, "background=profile"), t)
+    assert(has(t, "platforms=profile"), t)
+    assert(has(t, "niveis de emocao: 6"), t)
+    assert(has(t, "linguagem forte a partir do nivel: 4"), t)
+    // frequency changed on purpose (author's instruction, 2026-11-13): two
+    // repository-update schedules a day, down from four
+    assert(has(t, "schedules    : 2"), t)
+}
+
+test "personality: an authored profile that omits a mandatory block is refused, not defaulted" {
+    prepare("pers-broken")
+    var broken = "# company\nname: Quase La\n\n# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\n\n# personality\npersonality:\n  - curiosa\n\n# emotional_profile\nlevels:\n  - 0 neutro: tecnico\n  - 1 interesse: nota algo\n  - 2 entusiasmo: solta\n  - 3 conviccao: direto\n  - 4 indignacao: intenso\n  - 5 maxima: raro\n"
+    File(workDir("pers-broken") + "/company.kofmd").writeText(broken)
+    var o = cli("pers-broken", "11611", "check --company company.kofmd")
+    assert(exitOf(o) != 0, o)
+    assert(has(outOf(o), "emotional_profile.states esta vazio"), outOf(o))
+}
+
+test "personality: an emotion state without a level is a configuration error" {
+    prepare("pers-nolevel")
+    var bad = "# company\nname: Sem Nivel\n\n# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\n\n# personality\npersonality:\n  - curiosa\n\n# emotional_profile\nlevels:\n  - 0 neutro: a\n  - 1 interesse: b\n  - 2 entusiasmo: c\n  - 3 conviccao: d\n  - 4 indignacao: e\n  - 5 maxima: f\nstates:\n  - entusiasmo\n"
+    File(workDir("pers-nolevel") + "/company.kofmd").writeText(bad)
+    var o = cli("pers-nolevel", "11611", "check --company company.kofmd")
+    assert(exitOf(o) != 0, o)
+    assert(has(outOf(o), "sem nivel"), outOf(o))
+}
+
+// ---- 2. the persona is the FOUNDATION of the prompt ----
+
+test "personality: the system prompt is the author, not a corporate agent" {
+    prepare("pers-prompt")
+    var cp = runCmd("cp '" + publisherDir() + "/examples/mel.kofmd' '" + workDir("pers-prompt") + "/company.kofmd' && cp '" + publisherDir() + "/examples/amostras.kofmd' '" + workDir("pers-prompt") + "/amostras.kofmd'")
+    assert(exitOf(cp) == 0, cp)
+    startLm("pers-prompt", "11612", "persona")
+    var o = cli("pers-prompt", "11612", "samples --scenarios amostras.kofmd --runs 1 --company company.kofmd")
+    assert(exitOf(o) == 0, o)
+    stopLm("pers-prompt")
+    var t = File(workDir("pers-prompt") + "/prompts.log").readText()
+    if (t == null) {
+        throw "fixture did not log prompts"
+    }
+    // identity FIRST, in second person, as the author
+    assert(has(t, "Voce ESCREVE COMO Mel Santos"), t.substring(0, 800))
+    assert(has(t, "QUEM VOCE E"), "no background in the persona")
+    assert(has(t, "O QUE VOCE VALORIZA"), "no values in the persona")
+    assert(has(t, "COMO VOCE E"), "no personality in the persona")
+    assert(has(t, "SUA INTENSIDADE EMOCIONAL VAI DE 0 A 5"), "no emotion scale")
+    assert(has(t, "SEUS DOMINIOS TECNICOS"), "no domains")
+    assert(has(t, "ESTRUTURAS QUE VOCE NUNCA USA"), "no cliche guard")
+    assert(has(t, "Na revisao, voce NAO pode neutralizar a sua voz"), "no neutralization guard")
+    // the old generic agent is gone from the persona
+    assert(!has(t, "agente editorial de uma empresa"), "the generic corporate agent is still in the prompt")
+    assert(!has(t, "REGRA DA AUTORA"), "the old third-person rule block is still there")
+    // the hardcoded size/tag contradiction is gone: the limit comes from the profile
+    assert(!has(t, "Maximo 1300 caracteres"), "hardcoded 1300 chars is still in the prompt")
+    assert(has(t, "no maximo 3000 caracteres"), "the profile's own max_chars did not reach the prompt")
+    // the directive is in the USER prompt, after the material
+    assert(has(t, "DIRETIVA EDITORIAL DESTA PUBLICACAO"), "no directive in the user prompt")
+    assert(has(t, "TEMA DESTA PUBLICACAO"), "no topic")
+}
+
+// ---- 3. the directive is derived from the profile ----
+
+test "personality: emotion and intensity come from the declared domains and triggers" {
+    prepare("pers-frame")
+    var cp = runCmd("cp '" + publisherDir() + "/examples/mel.kofmd' '" + workDir("pers-frame") + "/company.kofmd' && cp '" + publisherDir() + "/examples/amostras.kofmd' '" + workDir("pers-frame") + "/amostras.kofmd'")
+    assert(exitOf(cp) == 0, cp)
+    startLm("pers-frame", "11613", "persona")
+    // --runs 2: the budget below is per call, so 25 scenarios x 1 sample would
+    // overflow it and the output would be cut mid-run.
+    var o = cli("pers-frame", "11613", "samples --scenarios amostras.kofmd --runs 2 --company company.kofmd")
+    assert(exitOf(o) == 0, o)
+    stopLm("pers-frame")
+    var t = outOf(o)
+
+    // A domain named in the pauta raises the baseline to its declared level.
+    var java = directiveOf(t, "java")
+    assert(has(java, "dominio=jvm"), java)
+    assert(has(java, "base=2"), java)
+    // A TRIGGER in the material outranks the slot's base: "descaso com usuario"
+    // is declared as indignacao at 4 in the profile.
+    var pa = directiveOf(t, "palavrao")
+    assert(has(pa, "emocao=indignacao"), pa)
+    assert(has(pa, "nivel=4"), pa)
+    // The slot's declared base is a FLOOR: a contraponto never derives to 0.
+    var ia = directiveOf(t, "ia")
+    assert(has(ia, "emocao=irritacao"), ia)
+    assert(has(ia, "nivel=3"), ia)
+    // ... and a purely technical subject can still be level 0 on purpose.
+    var neutro = directiveOf(t, "neutro")
+    assert(has(neutro, "nivel=0"), neutro)
+    // Every directive names the format the profile chose.
+    // Every sample of the 25 scenarios carries a format (except the one that
+    // skips by design, which the summary reports as 0/0).
+    assert(countOf(t, "formato=") >= 48, "not every sample carries a format")
+}
+
+test "personality: the level drives the answer through the model, not through a filter" {
+    prepare("pers-level")
+    var cp = runCmd("cp '" + publisherDir() + "/examples/mel.kofmd' '" + workDir("pers-level") + "/company.kofmd' && cp '" + publisherDir() + "/examples/amostras.kofmd' '" + workDir("pers-level") + "/amostras.kofmd'")
+    assert(exitOf(cp) == 0, cp)
+    startLm("pers-level", "11614", "persona")
+    var o = cli("pers-level", "11614", "samples --scenarios amostras.kofmd --runs 2 --company company.kofmd")
+    assert(exitOf(o) == 0, o)
+    stopLm("pers-level")
+    var t = outOf(o)
+    // The fixture answers per level; so the two scenarios with different
+    // derived levels must have DIFFERENT texts. If it were a final filter,
+    // both would be the same neutral draft.
+    assert(has(t, "==== cenario: neutro"), t)
+    assert(has(t, "O ajuste no parser de copybook"), "level-0 sample missing")
+    assert(has(t, "Me irrita profundamente"), "level-4 sample missing")
+}
+
+test "personality: repeated samples vary the format (diversity is not decoration)" {
+    prepare("pers-diversity")
+    var cp = runCmd("cp '" + publisherDir() + "/examples/mel.kofmd' '" + workDir("pers-diversity") + "/company.kofmd' && cp '" + publisherDir() + "/examples/amostras.kofmd' '" + workDir("pers-diversity") + "/amostras.kofmd'")
+    assert(exitOf(cp) == 0, cp)
+    startLm("pers-diversity", "11615", "persona")
+    var o = cli("pers-diversity", "11615", "samples --scenarios amostras.kofmd --runs 4 --company company.kofmd")
+    assert(exitOf(o) == 0, o)
+    stopLm("pers-diversity")
+    var t = outOf(o)
+    // Four samples of the SAME pauta must not share the slot's opening key.
+    assert(!has(t, "abertura repetida"), t)
+    // The formats chosen across a scenario are not all the same one.
+    var formats = setOf<String>()
+    for (var line in t.split("\n")) {
+        var i = line.indexOf("formato=")
+        if (i >= 0) {
+            formats.add(line.substring(i, line.length))
+        }
+    }
+    assert(formats.size() >= 4, "formats did not vary: " + joinList(formats))
+}
+
+// ---- 4. the editorial engine and the voice guards ----
+
+test "personality: a pauta with no subject is skipped, not written" {
+    prepare("pers-skip")
+    var cp = runCmd("cp '" + publisherDir() + "/examples/mel.kofmd' '" + workDir("pers-skip") + "/company.kofmd' && cp '" + publisherDir() + "/examples/amostras.kofmd' '" + workDir("pers-skip") + "/amostras.kofmd'")
+    assert(exitOf(cp) == 0, cp)
+    startLm("pers-skip", "11616", "persona")
+    var o = cli("pers-skip", "11616", "samples --scenarios amostras.kofmd --runs 1 --scenario insuficiente --company company.kofmd")
+    assert(exitOf(o) == 0, o)
+    stopLm("pers-skip")
+    assert(has(outOf(o), "SKIP: pauta sem assunto"), outOf(o))
+}
+
+test "personality: the forbidden 'nao e sobre X, e sobre Y' structure is rejected" {
+    prepare("pers-cliche")
+    var cp = runCmd("cp '" + publisherDir() + "/examples/mel.kofmd' '" + workDir("pers-cliche") + "/company.kofmd'")
+    assert(exitOf(cp) == 0, cp)
+    var w = runCmd("cp '" + publisherDir() + "/examples/amostras.kofmd' '" + workDir("pers-cliche") + "/amostras.kofmd'")
+    assert(exitOf(w) == 0, w)
+    startLm("pers-cliche", "11617", "cliche")
+    var o = cli("pers-cliche", "11617", "samples --scenarios amostras.kofmd --runs 1 --scenario conquista --company company.kofmd")
+    assert(exitOf(o) == 0, o)
+    stopLm("pers-cliche")
+    assert(has(outOf(o), "estrutura cliche que a autora proibe"), outOf(o))
+    assert(has(outOf(o), "validacao: nao"), outOf(o))
+}
+
+test "personality: an influencer crutch in a first post is a warning, repeated it blocks" {
+    prepare("pers-mug")
+    var cp = runCmd("cp '" + publisherDir() + "/examples/mel.kofmd' '" + workDir("pers-mug") + "/company.kofmd' && cp '" + publisherDir() + "/examples/amostras.kofmd' '" + workDir("pers-mug") + "/amostras.kofmd'")
+    assert(exitOf(cp) == 0, cp)
+    startLm("pers-mug", "11619", "influencer")
+    var o = cli("pers-mug", "11619", "samples --scenarios amostras.kofmd --runs 1 --scenario conquista --company company.kofmd")
+    assert(exitOf(o) == 0, o)
+    stopLm("pers-mug")
+    assert(has(outOf(o), "muleta de influenciador: 'recentemente'"), outOf(o))
+    assert(!has(outOf(o), "muleta de influenciador repetida"), "a first occurrence must not block")
+}
+
+test "personality: the revision keeps the directive instead of neutralizing the voice" {
+    prepare("pers-revise")
+    var cp = runCmd("cp '" + publisherDir() + "/examples/mel.kofmd' '" + workDir("pers-revise") + "/company.kofmd' && cp '" + publisherDir() + "/examples/amostras.kofmd' '" + workDir("pers-revise") + "/amostras.kofmd'")
+    assert(exitOf(cp) == 0, cp)
+    // The profile is repository-updates-only: `plan` has no material until the
+    // org repos are analysed, so the fixture seeds one repo per org.
+    runCmd("pkill -f 'fake_githu[b].py 11625' || true; true")
+    var gu = runCmd("{ python3 '" + publisherDir() + "/tests/fake_github.py' 11625 normal > '" + workDir("pers-revise") + "/gh.log' 2>&1 & echo $! > '" + workDir("pers-revise") + "/gh.pid'; }; sleep 1; curl -s -m 4 http://127.0.0.1:11625/health")
+    assert(exitOf(gu) == 0, gu)
+    var gc = "cd '" + workDir("pers-revise") + "' && KOF_PUBLISHER_HOME='" + workDir("pers-revise") + "/home' KOF_GITHUB_API=http://127.0.0.1:11625 java -cp '" + classpath() + "' Default.Main github --limit 10 --company company.kofmd --store pub.db 2>&1"
+    var gr = process.run("sh", "-c", gc)
+    assert(gr.exitCode == 0, gr.stdout)
+    runCmd("kill $(cat '" + workDir("pers-revise") + "/gh.pid') 2>/dev/null || true")
+    // A revision only happens when validation FAILS, so the fixture answers
+    // with the forbidden structure: the pipeline must then revise, and the
+    // revision prompt is what this test reads.
+    startLm("pers-revise", "11620", "cliche")
+    var o = cli("pers-revise", "11620", "plan --no-research --company company.kofmd --store pub.db")
+    stopLm("pers-revise")
+    var log = File(workDir("pers-revise") + "/prompts.log").readText()
+    if (log == null) {
+        throw "no prompt log"
+    }
+    // The model was told to correct without flattening the text.
+    assert(has(log, "nao pode amaciar o texto"), "revision prompt lost the anti-neutralization rule")
+    assert(has(log, "Mantenha a voz, a intensidade emocional e o ponto de vista"), log.substring(0, 500))
+}
+
+test "personality: a profile without # personality keeps the old behaviour" {
+    prepare("pers-legacy")
+    var legacy = "# company\nname: Antiga\n\n# topics\ntopics:\n  - engenharia\n\n# opinions\nopinions:\n  - prefere complexidade justificada\n\n# voice\ntone: direto\n\n# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\n\n# editorial\nmax_chars: 900\n"
+    File(workDir("pers-legacy") + "/company.kofmd").writeText(legacy)
+    var o = cli("pers-legacy", "11618", "check --company company.kofmd")
+    var t = outOf(o)
+    assert(has(t, "personalidade: perfil autoral declarado = nao"), t)
+    assert(has(t, "emotional_profile=fallback:sem # personality"), t)
+}
+
+// ---- the signature motif: "a little of me in every post" ----
+
+test "personality: every post carries one of the author's motifs, including level 0" {
+    prepare("pers-motif")
+    var cp = runCmd("cp '" + publisherDir() + "/examples/mel.kofmd' '" + workDir("pers-motif") + "/company.kofmd' && cp '" + publisherDir() + "/examples/amostras.kofmd' '" + workDir("pers-motif") + "/amostras.kofmd'")
+    assert(exitOf(cp) == 0, cp)
+    startLm("pers-motif", "11621", "persona")
+    // `neutro` is the level-0 scenario: the subject raises no emotion at all.
+    // That is exactly the case the motif exists for — a technically correct
+    // post that could have been written by anyone is the failure mode.
+    var o = cli("pers-motif", "11621", "samples --scenarios amostras.kofmd --runs 1 --scenario neutro --company company.kofmd")
+    stopLm("pers-motif")
+    var t = outOf(o)
+    assert(has(t, "DIRETIVA> angulo proprio: "), t)
+    // The motif is not a slogan appended at the end: the prompt tells the model
+    // to use it as a criterion, and the validator reports when it is absent.
+    assert(!has(t, "nenhum angulo proprio da autora no texto"), t)
+}
+
+test "personality: the motif is derived from the profile, not hardcoded" {
+    prepare("pers-motif-profile")
+    // A profile with ONE motif: whatever the subject, that is the angle.
+    var c = "# company\nname: Teste\n\n# background\nbackground:\n  - engenheira\n\n# values\nvalues:\n  - clareza\n\n# personality\npersonality:\n  - direta\n\n# emotional_profile\nlevels:\n  - 0 neutro: tecnico\n  - 1 interesse: nota\n  - 2 entusiasmo: solto\n  - 3 conviccao: firme\n  - 4 indignacao: intenso\n  - 5 maximo: raro\nstates:\n  - irritacao: 3, processo inutil\nrules:\n  - proporcional\n\n# technical_domains\ntechnical_domains:\n  - java: 2, o que custa manter\n\n# editorial_engine\nquestions:\n  - por que isso importa\n  - quem mantem isso\navoid_forms:\n  - licao de vida\n\n# diversity\nformats:\n  - analise\n  - critica\n\n# review\nchecks:\n  - autenticidade: parece ela\nneutralize_forbidden:\n  - nao amacie\n\n# strong_language\nlevels: 4\nstrong_language:\n  - so no nivel 4\n\n# signature\nmotifs:\n  - o custo de manutencao antes da novidade\n\n# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\n\n# editorial\nmax_chars: 2000\n"
+    File(workDir("pers-motif-profile") + "/company.kofmd").writeText(c)
+    var o = cli("pers-motif-profile", "11622", "check --company company.kofmd")
+    var t = outOf(o)
+    assert(has(t, "signature.motifs=profile"), t)
+}
+
+test "personality: a profile without motifs still works (no invented angle)" {
+    prepare("pers-motif-none")
+    var c = "# company\nname: Sem Motivo\n\n# topics\ntopics:\n  - engenharia\n\n# opinions\nopinions:\n  - prefere simplicidade\n\n# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\n\n# editorial\nmax_chars: 900\n"
+    File(workDir("pers-motif-none") + "/company.kofmd").writeText(c)
+    var o = cli("pers-motif-none", "11623", "check --company company.kofmd")
+    var t = outOf(o)
+    // Absent is reported, never filled with a default the author did not write.
+    assert(has(t, "signature.motifs=ausente"), t)
+}

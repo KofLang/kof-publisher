@@ -643,3 +643,63 @@ test "service: a slot whose LM failed is retried and actually publishes" {
     runCmd("kill $(cat '" + workDir("svc-flaky") + "/lm.pid') 2>/dev/null || true")
     stopResearch("svc-flaky")
 }
+
+// REGRESSION 2026-11-07: one slot, TWO posts.
+//
+// The 06:00 slot published at 05:53. The retry was scheduled for 05:56, and
+// because that instant was still AHEAD of the clock the retry generated a
+// fresh draft and published it too — two LinkedIn posts for one slot. Two
+// causes, both fixed: "already claimed" was counted as a miss, and a slot that
+// had already posted was still eligible for a retry.
+test "service: a slot that already published is never retried (no duplicate post)" {
+    runCmd("for p in $(pgrep -f 'Default.Main daemo[n]'); do d=$(readlink /proc/$p/cwd 2>/dev/null); if [ \"$d\" = '" + workDir("svc-dup") + "' ]; then kill -9 $p 2>/dev/null || true; fi; done; true")
+    prepare("svc-dup")
+    File(workDir("svc-dup") + "/company.kofmd").writeText(autonomousCompany())
+    // "empty" = the sources answer well-formed but EMPTY lists, so this run
+    // has no candidate at all and SKIPS deterministically. The skip is the
+    // "miss" that used to schedule the duplicate retry.
+    startResearch("svc-dup", "11960", "empty")
+    startLm("svc-dup", "11961")
+
+    var sync = cliFixturesRetry("svc-dup", "11960", "11961", "sync --company company.kofmd --store pub.db")
+    assert(exitOf(sync) == 0, sync)
+
+    // Reproduce the 2026-11-07 sequence WITHOUT waiting for a real clock:
+    //   1. the slot already POSTED today (a successful publication occurrence
+    //      is seeded in the ledger, exactly as the 05:53 post left it);
+    //   2. the slot is due again and this run SKIPS (empty research = no
+    //      candidate), which is the "miss" that used to schedule a retry.
+    // Before the fix the retry was scheduled and, because its instant was
+    // still ahead, it generated a SECOND draft and published it.
+    runCmd("python3 -c \"import sqlite3,datetime; tz=datetime.timezone(datetime.timedelta(hours=-3)); now=datetime.datetime.now(tz); day=now.strftime('%Y-%m-%d'); t=(now-datetime.timedelta(minutes=1)).strftime('%Y-%m-%dT%H:%M:%S-03:00'); c=sqlite3.connect('" + workDir("svc-dup") + "/pub.db'); c.execute(\\\"update schedule set next_execution=? where name='noon'\\\", (t,)); c.execute(\\\"insert into occurrence (id,recurrence_id,occurrence_time,publication_id,stage,result,detail,started_at,finished_at) values (?,?,?,?,?,?,?,?,?)\\\", ('noon@'+day+'T05:53:00-03:00','noon',day+'T05:53:00-03:00','pub-ja-postado','publication','success','',day+'T05:53:00-03:00',day+'T05:53:00-03:00')); c.commit()\"")
+
+    var s = cliFixturesRetry("svc-dup", "11960", "11961", "start --company company.kofmd --store pub.db")
+    assert(exitOf(s) == 0, s)
+
+    var logPath = workDir("svc-dup") + "/home/publisher.log"
+    var waited = 0
+    while (waited < 90000) {
+        var n = runCmd("grep -c 'ja publicou hoje' '" + logPath + "' 2>/dev/null; true")
+        if (outOf(n).trim() != "0") {
+            break
+        }
+        runCmd("sleep 2")
+        waited = waited + 2000
+    }
+    var stop = cliFixturesRetry("svc-dup", "11960", "11961", "stop")
+    assert(exitOf(stop) == 0, stop)
+    forceCleanup("svc-dup")
+
+    var log = outOf(runCmd("cat '" + logPath + "' 2>/dev/null"))
+    // The guard fired: the slot had already posted, so the miss was NOT
+    // turned into a retry.
+    assert(has(log, "ja publicou hoje"), "o guarda de post duplicado nao disparou:\n" + log)
+    assert(!has(log, "nova tentativa em"), "o slot ja tinha publicado e mesmo assim agendou retentativa:\n" + log)
+
+    // And the ledger still holds exactly ONE successful publication for the day.
+    var count = runCmd("python3 -c \"import sqlite3; c=sqlite3.connect('" + workDir("svc-dup") + "/pub.db'); print(c.execute(\\\"select count(*) from publication where status='published'\\\").fetchone()[0])\"")
+    assert(outOf(count).trim() == "0", "nenhuma publicacao nova deveria existir, veio: " + outOf(count))
+
+    stopLm("svc-dup")
+    stopResearch("svc-dup")
+}
