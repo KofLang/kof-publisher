@@ -363,12 +363,14 @@ test "integration: research + github + profile fill all four functions into REVI
     assert(has(out, "origem: profile"), out)
 
     // 3. the memory is persisted: 4 pautas, the consulted sources with both
-    //    dates, and nothing in published
+    //    dates, and nothing in published. Two sources: the research item the
+    //    news pauta used, plus the repository itself, registered as a source
+    //    so the repo link carried by the draft is traceable.
     var st = runCmd("cd '" + workDir("pl-integ") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-integ") + "/home' java -cp '" + classpath() + "' Default.Main db-stats --company company.kofmd --store pub.db 2>&1")
     var stOut = outOf(st)
     assert(has(stOut, "pautas       : 4"), stOut)
     assert(has(stOut, "published  : 0"), stOut)
-    assert(has(stOut, "fontes       : 1"), stOut)
+    assert(has(stOut, "fontes       : 2"), stOut)
 
     // 4. reviewing any proposal shows its pauta, its sources and both gates
     var id = firstIdIn(out)
@@ -692,4 +694,45 @@ test "plan: two repository-only slots take different orgs, newest activity first
     assert(!has(first, "KofLang/kof4j"), first)
     stopLm("pl-repoonly")
     stopResearch("pl-repoonly")
+}
+
+// The author asked (2026-11-16) for the repository link in the posts. The
+// link is FIXED content applied by the pipeline, not something the model is
+// asked to remember: the draft ends with the repo URL, and the factual gate
+// still passes because the repo URL is registered as a source of the pauta.
+test "plan: a repository post carries the repository link" {
+    prepare("pl-repolink")
+    var c = "# company\nname: Mel Santos\n\n# topics\ntopics:\n  - Java e o ecossistema JVM\n  - projetos open source\n\n# publishing\ntimezone: America/Sao_Paulo\nmode: assisted\ntarget: linkedin\n\n"
+    c = c + "# editorial\nrequire_material: true\nresearch:\n  - hackernews\nresearch_max_age_hours: 168\n\n"
+    c = c + "# github\nenabled: true\norgs:\n  - KofLang\n  - Rede-ENois\n\n"
+    c = c + "# category morning\nclock: 06:00\nlabel: trabalho real e projetos\nfunction: projetos\nangle: o que mudou no projeto\n\n"
+    c = c + "# category evening\nclock: 17:00\nlabel: trabalho real e projetos\nfunction: projetos\nangle: o que mudou no outro projeto\n"
+    File(workDir("pl-repolink") + "/company.kofmd").writeText(c)
+
+    startGithubFixture("pl-repolink", "12093", "normal")
+    startResearch("pl-repolink", "12094", "normal")
+    startLm("pl-repolink", "12095")
+    var g = runCmd("cd '" + workDir("pl-repolink") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-repolink") + "/home' KOF_GITHUB_API=http://127.0.0.1:12093 java -cp '" + classpath() + "' Default.Main github --limit 10 --company company.kofmd --store pub.db")
+    assert(exitOf(g) == 0, g)
+    stopGithubFixture("pl-repolink")
+
+    var base = "http://127.0.0.1:12094"
+    var cmd = "cd '" + workDir("pl-repolink") + "' && KOF_PUBLISHER_HOME='" + workDir("pl-repolink") + "/home'"
+        + " KOF_RESEARCH_HN_API='" + base + "/hn' KOF_RESEARCH_DEVTO_API='" + base + "/devto' KOF_RESEARCH_TIMEOUT=10"
+        + " KOF_LM_URL=http://127.0.0.1:12095 KOF_LM_MODEL=fake-lm KOF_LM_TOKENS=400 KOF_LM_TIMEOUT=25"
+        + " java -cp '" + classpath() + "' Default.Main plan --company company.kofmd --store pub.db 2>&1"
+    var p = runCmd(cmd)
+    assert(exitOf(p) == 0, p)
+    var out = outOf(p)
+
+    // 2 proposals, and each one's draft carries ITS repo's link
+    assert(has(out, "2 proposta(s) em REVIEW"), out)
+    var enois = out.indexOf("tema: atualizacao no projeto Rede-ENois/enois-backend")
+    var kof = out.indexOf("tema: atualizacao no projeto KofLang/kof4j")
+    assert(enois >= 0 && kof > enois, out)
+    assert(has(out.substring(enois, kof), "https://github.com/Rede-ENois/enois-backend"), out)
+    assert(has(out.substring(kof, out.length), "https://github.com/KofLang/kof4j"), out)
+
+    stopLm("pl-repolink")
+    stopResearch("pl-repolink")
 }

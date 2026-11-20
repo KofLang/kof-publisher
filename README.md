@@ -718,6 +718,33 @@ da assinatura tambem e excluido da checagem de rastreabilidade (ele nao e uma
 fonte consultada). O slot das **06:00** tambem pode escolher uma noticia ou
 curiosidade sobre o Kof, nao so uma mudanca de commit.
 
+## Link do repositorio nas postagens
+
+Todo post de **atualizacao de repositorio** termina com o link do proprio
+repositorio, logo acima da assinatura do Kof quando ela existe:
+
+```
+A mudanca que chegou ao enois-backend ...
+
+https://github.com/Rede-ENois/enois-backend
+```
+
+Como a assinatura, o link e **conteudo fixo aplicado por codigo**
+(`storedWithRepoLink`), nao um pedido ao modelo: o link e sempre a penultima
+linha (ultima antes do grito de guerra) e o texto entregue ao prompt e ao
+Gate de repeticao esse trecho fixo e retirado do texto. A URL do repo entra como **fonte da
+pauta** (`SourceRef` com `source_type=repo`), entao a checagem de
+rastreabilidade nao acusa o link como uma citacao sem fonte.
+
+Detalhe que surgiu do proprio gate: como o link e igual em dois posts sobre o
+MESMO repositorio, comparar o texto como armazenado fazia o segundo post
+parecer repeticao do primeiro. Por isso `plan` (e o daemon) comparam a
+**prosa antes do link** (`recentProseExcluding`). Um rascunho com ressalva
+factual guardado em REVIEW tambem carregava o link e bloqueava o repositorio
+para o proximo plano: esse rascunho e retirado do REVIEW (vai para
+`cancelled`, texto preservado) com a ressalva no campo de erro, e a analise do
+repositorio continua na base.
+
 ## Idempotência (aceitação §12/§13)
 
 Uma ocorrência = `(agenda, instante)`, chave determinística reivindicada no

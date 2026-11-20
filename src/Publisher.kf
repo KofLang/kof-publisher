@@ -472,7 +472,76 @@ String persistPlanTopicFor(Store store, Company company, PlanCandidate c, String
             researchExtent(it.summary(), it.source_type()),
             strings.truncate(it.summary(), 300)))
     }
+    // The repo post gets its own traceability row: the draft carries the
+    // repository link, and the factual gate requires a cited URL to be a source
+    // of the pauta. Without this the repo's own URL read as an uncited
+    // citation and the post was held back with a false "rastreabilidade"
+    // problem.
+    if (c.origin() == "repo" && c.source_urls().size() > 0) {
+        var repo = store.findRepoState(c.origin_ref())
+        var title = c.origin_ref()
+        var pushed = ""
+        if (repo != null) {
+            title = c.origin_ref() + " — " + repo.description()
+            pushed = repo.pushed_at()
+        }
+        store.saveSource(SourceRef(
+            tid + "::" + strings.slugify(c.source_urls().get(0)),
+            tid,
+            strings.slugify(c.source_urls().get(0)),
+            c.source_urls().get(0),
+            strings.truncate(title, 200),
+            "github",
+            pushed,
+            now,
+            c.evidence(),
+            "repo",
+            "metadados",
+            strings.truncate(c.evidence(), 300)))
+    }
     return tid
+}
+
+// ---- repo post framing: link and comparison text ----
+
+// The repository URL a repo pauta carries in its post, "" for any other origin.
+String candidateRepoUrl(PlanCandidate c) {
+    if (c.origin() == "repo" && c.source_urls().size() > 0) {
+        return c.source_urls().get(0)
+    }
+    return ""
+}
+
+// The recent-content list the anti-repetition gate compares a repo post
+// against: every item with its repository link stripped. The link is FIXED
+// content, so once two posts are about the SAME repository their endings are
+// identical and the earlier post would read as repetition of the newer draft —
+// the second post about a project could never pass. The prose before the link
+// is what the gate is about.
+List<String> recentProseExcluding(List<String> recent, String url) {
+    var out = listOf<String>()
+    for (var r in recent) {
+        out.add(withoutRepoLink(r, url))
+    }
+    return out
+}
+
+// Withdraw the draft parked in REVIEW because every candidate for its slot
+// failed the factual gate. A repo draft carries the repository link, and in
+// REVIEW it counts as recent content: the next plan would see that repository
+// as already used and never write about it again. Cancelled keeps the text for
+// the human to read while freeing the repository; the persisted analysis and
+// the pauta's caveat stay untouched.
+void discardHeldBackDraft(Store store, String id, String repoUrl) {
+    var found = store.findPublication(id)
+    if (found == null) {
+        return
+    }
+    var p = found
+    if (p.status() != statusReview()) {
+        return
+    }
+    store.savePublication(Publication(p.id(), p.company(), p.topic(), p.content(), statusCancelled(), p.created_at(), p.scheduled_at(), p.published_at(), p.target(), p.model(), p.context_version(), p.recurrence_id(), p.external_id(), "descartado do REVIEW: " + p.error() + " (repo " + repoUrl + ")", p.occurrence_key(), p.attempts(), p.topic_id()))
 }
 
 // Remove the day's four proposals from REVIEW so a re-run can replace them
@@ -659,6 +728,8 @@ Int cmdPlan(Store store, Company company, List<String> args) {
         var lastFailId = ""
         var lastFailTid = ""
         var lastFailTheme = ""
+        var lastFailRepoUrl = ""
+        var lastFailCaveat = ""
         for (var cand in tries) {
             if (produced) {
                 continue
@@ -678,6 +749,12 @@ Int cmdPlan(Store store, Company company, List<String> args) {
             println("evidencia: " + c.evidence())
 
             var ed = Editorial(company).withFunction(ch.function())
+            // A repo post ends with the repository link (fixed content).
+            var repoUrlOf = candidateRepoUrl(c)
+            if (repoUrlOf != "") {
+                ed = ed.withRepoUrl(repoUrlOf)
+            }
+            var recentProse = recentProseExcluding(recent, repoUrlOf)
             var block = planEvidenceBlockFor(store, c, run)
             if (block != "") {
                 ed = ed.withExtra(block)
@@ -697,12 +774,12 @@ Int cmdPlan(Store store, Company company, List<String> args) {
                     }
                     throw e
                 }
-                v = ed.validate(draft, recent)
+                v = ed.validate(draft, recentProse)
                 if (v.ok()) {
                     break
                 }
-                draft = ed.reviseIn(draft, v, recent, ch.label(), ch.angle())
-                var v2 = ed.validate(draft, recent)
+                draft = ed.reviseIn(draft, v, recentProse, ch.label(), ch.angle())
+                var v2 = ed.validate(draft, recentProse)
                 if (v2.ok()) {
                     v = v2
                     break
@@ -738,6 +815,8 @@ Int cmdPlan(Store store, Company company, List<String> args) {
                 lastFailId = id
                 lastFailTid = tid
                 lastFailTheme = c.theme()
+                lastFailRepoUrl = repoUrlOf
+                lastFailCaveat = joinList(fc.problems())
                 for (var fp in fc.problems()) {
                     println("  problema: " + fp)
                 }
@@ -747,7 +826,7 @@ Int cmdPlan(Store store, Company company, List<String> args) {
                 println("")
                 continue
             }
-            store.savePublication(Publication(id, company.name(), c.theme(), draft, statusReview(), now, "", "", "dryrun", lmModel(), company.digest(), "", "", "", id, 0, tid))
+            store.savePublication(Publication(id, company.name(), c.theme(), draft, statusReview(), now, "", "", "dryrun", lmModel(), company.digest(), "", "", joinList(fc.warnings()), id, 0, tid))
             markTopicOutcome(store, tid, "validado", "")
             observability.increment("publisher.content.generated", 1)
             observability.increment("publisher.content.validated", 1)
@@ -772,8 +851,15 @@ Int cmdPlan(Store store, Company company, List<String> args) {
             // last failure as a REVIEW item so the block is visible instead of
             // leaving the slot mysteriously empty; it is never approved.
             if (lastFailDraft != "") {
-                store.savePublication(Publication(lastFailId, company.name(), lastFailTheme, lastFailDraft, statusReview(), now, "", "", "dryrun", lmModel(), company.digest(), "", "", "", lastFailId, 0, lastFailTid))
+                store.savePublication(Publication(lastFailId, company.name(), lastFailTheme, lastFailDraft, statusReview(), now, "", "", "dryrun", lmModel(), company.digest(), "", "", lastFailCaveat, lastFailId, 0, lastFailTid))
                 println("  (rascunho guardado em REVIEW com a ressalva; nenhuma alternativa restou)")
+                // A held-back repo draft still carries its link. In REVIEW it
+                // is "recent content" like any other draft and would make the
+                // next run read the repository itself as already used.
+                if (lastFailRepoUrl != "") {
+                    discardHeldBackDraft(store, lastFailId, lastFailRepoUrl)
+                    println("  (a analise do repositorio continua na base; o rascunho com ressalva nao bloqueia o proximo plano)")
+                }
             }
         }
     }
@@ -871,7 +957,19 @@ Int cmdReview(Store store, Company company, List<String> args) {
     println(p.content())
     println("---- validacao editorial ----")
     var ed = Editorial(company)
-    var v = ed.validate(p.content(), store.recentEditorialContents(8, p.id()))
+    // Same comparison as generation: a repo post's fixed link must not read
+    // as repetition of the earlier post about the same repository.
+    var reviewRecent = store.recentEditorialContents(8, p.id())
+    var repoUrls = listOf<String>()
+    for (var sr in store.sourcesByTopic(p.topic_id())) {
+        if (sr.source_type() == "repo" && repoUrls.indexOf(sr.url()) < 0) {
+            repoUrls.add(sr.url())
+        }
+    }
+    for (var ru in repoUrls) {
+        reviewRecent = recentProseExcluding(reviewRecent, ru)
+    }
+    var v = ed.validate(p.content(), reviewRecent)
     if (v.ok()) {
         println("OK deterministico: aprovado")
     } else {

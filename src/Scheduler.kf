@@ -330,6 +330,11 @@ class Scheduler {
         }
         observability.increment("publisher.schedule.triggered", 1)
         var recent = store.recentEditorialContents(8, "")
+        // A repo occurrence compares against the recent posts WITHOUT their
+        // repository links (fixed content: two posts about the same repo share
+        // the ending and would read as repetition of each other).
+        var repoUrlOf = ""
+        var recentProse = recent
         var mode = effectiveMode(s)
         var target = targetName(s)
         // The schedule's clock maps to an editorial category (personal profile
@@ -403,6 +408,12 @@ class Scheduler {
             var cand = chosen.candidate()
             topic = cand.theme()
             objective = planObjective(chosen)
+            // A repo post ends with the repository link (fixed content).
+            repoUrlOf = candidateRepoUrl(cand)
+            if (repoUrlOf != "") {
+                ed = ed.withRepoUrl(repoUrlOf)
+            }
+            recentProse = recentProseExcluding(recent, repoUrlOf)
             var block = planEvidenceBlock(store, chosen, run)
             if (block != "") {
                 ed = ed.withExtra(block)
@@ -469,13 +480,13 @@ class Scheduler {
                     log.warn("ocorrencia " + key + ": geracao falhou (erro interno): " + em)
                     return ExecReport(key, "", "skipped", "generation: " + em)
                 }
-                v = ed.validate(draft, recent)
+                v = ed.validate(draft, recentProse)
                 if (v.ok()) {
                     content = draft
                     break
                 }
-                draft = ed.reviseIn(draft, v, recent, catLabel, catAngle)
-                var v2 = ed.validate(draft, recent)
+                draft = ed.reviseIn(draft, v, recentProse, catLabel, catAngle)
+                var v2 = ed.validate(draft, recentProse)
                 if (v2.ok()) {
                     content = draft
                     v = v2

@@ -1353,6 +1353,78 @@ String ensureKofSignature(String text) {
     return out + kofBattleCry()
 }
 
+// ---- repository link (author-mandated) ----
+//
+// The author asked for the repository link in every repo-update post. Like the
+// Kof signature, this is FIXED content: it is guaranteed here instead of being
+// hoped for in the prompt, because a model that forgets the link leaves a post
+// with nothing to click and nobody notices until it is live.
+
+// Append the repository URL to the draft (just above the Kof battle cry when
+// there is one). No-op when the draft already carries the URL. Only
+// `withoutRepoLink` touches an existing link.
+String withRepoLink(String text, String url) {
+    if (url == "" || text.indexOf(url) >= 0) {
+        return text
+    }
+    if (text.indexOf(kofBattleCry()) >= 0) {
+        return stripAllLiteral(text, kofBattleCry()).trim() + "\n\n" + url + "\n\n" + kofBattleCry()
+    }
+    return text.trim() + "\n\n" + url
+}
+
+// Text as stored: the link is a FINAL-EXIT line, directly above the battle
+// cry. Appending it to every draft is not enough — the anti-repetition gate
+// compares the whole content, so two posts about the SAME repository shared
+// the identical ending and the second one was discarded as repetition.
+String storedWithRepoLink(String text, String url) {
+    if (url == "") {
+        return text
+    }
+    return withRepoLink(withoutRepoLink(text, url), url)
+}
+
+// Remove the link line and the blank line before it, so the text before the
+// signature is exactly the prose. A URL glued to the sentence ("... o repo
+// https://...") is not a link line and is left alone.
+String withoutRepoLink(String text, String url) {
+    if (url == "") {
+        return text
+    }
+    // Trailing lines come OFF first (battle cry and the site link its
+    // signature adds), so the repository link is the last line examined.
+    var lines = text.trim().split("\n")
+    var trimmed = listOf<String>()
+    for (var l in lines) {
+        trimmed.add(l.trim())
+    }
+    while (trimmed.size() > 0 && trimmed.get(trimmed.size() - 1) == "") {
+        trimmed.remove(trimmed.size() - 1)
+    }
+    var isTail = true
+    while (isTail && trimmed.size() > 0) {
+        var last = trimmed.get(trimmed.size() - 1)
+        isTail = last == "" || last == kofBattleCry() || last == kofSite()
+        if (isTail) {
+            trimmed.remove(trimmed.size() - 1)
+        }
+    }
+    if (trimmed.size() > 0 && trimmed.get(trimmed.size() - 1) == url) {
+        trimmed.remove(trimmed.size() - 1)
+        while (trimmed.size() > 0 && trimmed.get(trimmed.size() - 1) == "") {
+            trimmed.remove(trimmed.size() - 1)
+        }
+    }
+    var out = ""
+    for (var l in trimmed) {
+        if (out != "") {
+            out = out + "\n"
+        }
+        out = out + l
+    }
+    return out
+}
+
 // Strip model wrappers (code fences, surrounding quotes) — keep the body.
 String cleanDraft(String raw) {
     var t = raw
@@ -1440,6 +1512,8 @@ class Editorial {
     // the caller can print it and the author can see why the post sounds the
     // way it does.
     String lastDirective
+    // The repository URL of the pauta, when it came from a repo.
+    String repoUrl
 
     constructor(Company company) {
         this.company = company
@@ -1447,6 +1521,7 @@ class Editorial {
         this.slotFunction = ""
         this.seed = ""
         this.lastDirective = ""
+        this.repoUrl = ""
     }
 
     Editorial withSeed(String s) {
@@ -1461,6 +1536,15 @@ class Editorial {
 
     Editorial withFunction(String function) {
         this.slotFunction = function
+        return this
+    }
+
+    // The repository URL this post is about, when the pauta came from a repo.
+    // The link is appended to the finished text (fixed content, not a request
+    // to the model), so a post about a project always ends with a clickable
+    // link to it.
+    Editorial withRepoUrl(String url) {
+        this.repoUrl = url
         return this
     }
 
@@ -1642,6 +1726,9 @@ class Editorial {
             throw "generate: " + r.error()
         }
         var out = cleanDraft(r.text())
+        // The repository link is FIXED content, applied after the draft exists
+        // (and after the Kof signature, which must stay the last line).
+        out = storedWithRepoLink(out, repoUrl)
         // The engine gate is also enforced on the OUTPUT: a model that answers
         // "SKIP: ..." instead of writing is obeying, not failing.
         if (out.startsWith("SKIP:")) {
@@ -2505,6 +2592,9 @@ class Editorial {
         if (!r.ok()) {
             throw "revise: " + r.error()
         }
-        return cleanDraft(r.text())
+        var out = cleanDraft(r.text())
+        // The revision may drop the link (the model rewrites the ending), so it
+        // is re-applied here as well.
+        return storedWithRepoLink(out, repoUrl)
     }
 }
